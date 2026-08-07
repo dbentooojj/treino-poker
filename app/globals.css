@@ -254,3 +254,92 @@ select { padding:0 10px; outline:0; }
   .hrc-local-note { margin-top:12px; }.hrc-pack-bar { margin-top:10px; width:calc(100% - 20px); align-items:flex-start; flex-direction:column; padding:10px 12px; }.hrc-table-shell { min-height:300px; border-radius:0; border-left:0; border-right:0; padding:42px 32px 45px; }.hrc-table { width:100%; border-width:8px; box-shadow:0 0 0 1px #303c39,0 0 0 9px #090d0e,0 20px 40px #0008,inset 0 0 55px #051a13; }.hrc-villain { top:-23px; }.hrc-action-grid,.hrc-action-grid.actions-2,.hrc-action-grid.actions-3 { grid-template-columns:repeat(2,1fr); }.solver-result-list>div { grid-template-columns:83px 1fr 39px; gap:5px; }.solver-result-list small { grid-column:2/4; text-align:left; }.hero-actions .import-button { width:100%; }.hero-actions .primary-button { width:100%; justify-content:center; }
   .auth-topbar { width:calc(100% - 30px); height:66px; }.auth-back { font-size:0; }.auth-back:after { content:"← Início"; font-size:9px; }.auth-layout { width:calc(100% - 24px); min-height:calc(100vh - 66px); padding:30px 0 45px; }.auth-story h1 { font-size:43px; letter-spacing:-2.5px; }.auth-story>p { font-size:12px; }.auth-visual { height:160px; border-width:8px; box-shadow:0 0 0 1px #30403c,0 0 0 9px #090d0e,0 25px 50px #0008,inset 0 0 40px #061b16; }.auth-pot small { display:none; }.auth-card { width:39px; height:53px; bottom:17px; }.auth-card-one { left:calc(50% - 35px); }.auth-panel { padding:27px 20px; }.auth-heading h2,.recovery-success h2 { font-size:24px; }.auth-benefits { gap:12px; }.recovery-success { min-height:360px; }
 }
+
+/* Readable type scale */
+.nav-links a { font-size:14px; }
+.ghost-button,.login-button { font-size:13px; }
+.ghost-import { font-size:11px; }
+.eyebrow { font-size:12px; }
+.hero-copy>p { font-size:17px; }
+.primary-button,.import-button { font-size:14px; }
+.hrc-local-note { font-size:11px; }
+.hrc-local-note span { font-size:9px; }
+.concept-row span { font-size:11px; }
+.mode-strip>p { font-size:11px; }
+.mode-list button { font-size:13px; }
+.promise-grid h2 { font-size:19px; }
+.promise-grid p { font-size:14px; }
+.setup-heading>span { font-size:11px; }
+.setup-heading p { font-size:14px; }
+.setup-group>label,.tournament-options>label { font-size:12px; }
+.choice-grid button,.static-input,select,.input-unit { font-size:13px; }
+.icm-row b { font-size:13px; }
+.icm-row small { font-size:11px; }
+.start-button { font-size:15px; }
+.trainer-layout { grid-template-columns:minmax(0,1fr) 276px; }
+.spot-context { font-size:12px; }
+.exit-button { font-size:12px; }
+.street-progress>div { font-size:10px; }
+.table-meta>span { font-size:10px; }
+.table-meta small { font-size:9px; }
+.game-seat { min-width:96px; }
+.game-seat span { font-size:9px; }
+.game-seat b { font-size:12px; }
+.game-seat small { font-size:8px; }
+.center-pot span { font-size:9px; }
+.center-pot b { font-size:14px; }
+.decision-copy>span { font-size:10px; }
+.decision-copy h1 { font-size:20px; }
+.decision-copy p { font-size:12px; }
+.action-grid button { font-size:13px; }
+.action-grid button small { font-size:9px; }
+.sizing-head { font-size:12px; }
+.unit-tabs button,.preset-row button { font-size:10px; }
+.size-value span { font-size:9px; }
+.size-value b { font-size:14px; }
+.confirm-size { font-size:11px; }
+.feedback-main>span { font-size:9px; }
+.feedback-main h2 { font-size:17px; }
+.feedback-main>p { font-size:12px; }
+.metric-grid span { font-size:9px; }
+.metric-grid b { font-size:13px; }
+.metric-grid small { font-size:9px; line-height:1.35; }
+.feedback-bottom>small,.feedback-bottom button { font-size:10px; }
+.rail-title { font-size:9px; }
+.rail-title i { font-size:8px; }
+.accuracy-ring span { font-size:9px; }
+.stat-row span { font-size:9px; }
+.stat-row b { font-size:14px; }
+.leak-card p { font-size:11px; }
+.leak-row { font-size:10px; }
+.leak-row b { font-size:9px; }
+.concept-card>span { font-size:9px; }
+.concept-card i { font-size:9px; }
+.hrc-pack-bar>span { font-size:11px; }
+.hrc-pack-bar>div { font-size:10px; }
+.hrc-player-note { font-size:9px; }
+.hrc-action-grid button>span { font-size:13px; }
+.hrc-action-grid button>b { font-size:13px; }
+.hrc-action-grid button>small { font-size:9px; }
+.solver-result-list span,.solver-result-list b { font-size:10px; }
+.solver-result-list small { font-size:9px; }
+.auth-heading>span,.recovery-success>span { font-size:10px; }
+.auth-heading p,.recovery-success p { font-size:13px; }
+.auth-form>label,.auth-label-row label { font-size:11px; }
+.auth-label-row a { font-size:11px; }
+.auth-field input { font-size:14px; }
+.password-toggle { font-size:10px; }
+.remember-row { font-size:11px!important; }
+.auth-submit { font-size:13px; }
+.auth-footer-copy { font-size:12px; }
+.auth-legal { font-size:9px; }
+
+@media (max-width:850px) {
+  .trainer-layout { grid-template-columns:1fr; }
+}
+
+@media (max-width:520px) {
+  .game-seat { min-width:68px; }
+  .hero-copy>p { font-size:16px; }
+  .auth-story>p { font-size:14px; }
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type ActionName = "Fold" | "Check" | "Call" | "Bet" | "Raise" | "All-in";
 type StatState = { answered: number; correct: number; errors: number; topics: Record<string, number> };
@@ -252,11 +252,19 @@ function HrcImportButton({onImport,onError,className="import-button"}:{onImport:
 }
 
 export default function Home() {
-  const [setupOpen,setSetupOpen]=useState(false), [mode,setMode]=useState("Torneio"), [training,setTraining]=useState(false), [hrcPack,setHrcPack]=useState<HrcPack|null>(null), [hrcError,setHrcError]=useState("");
-  if(hrcPack)return <HrcTrainer pack={hrcPack} onExit={()=>setHrcPack(null)}/>;
+  const [setupOpen,setSetupOpen]=useState(false), [mode,setMode]=useState("Torneio"), [training,setTraining]=useState(false), [hrcPack,setHrcPack]=useState<HrcPack|null>(null), [hrcError,setHrcError]=useState(""), [isAdmin,setIsAdmin]=useState(false);
+  useEffect(()=>{
+    let active=true;
+    fetch("/api/admin-status",{cache:"no-store"})
+      .then(response=>response.ok?response.json():{isAdmin:false})
+      .then(data=>{if(active)setIsAdmin(data.isAdmin===true);})
+      .catch(()=>{if(active)setIsAdmin(false);});
+    return()=>{active=false;};
+  },[]);
+  if(hrcPack&&isAdmin)return <HrcTrainer pack={hrcPack} onExit={()=>setHrcPack(null)}/>;
   if(training)return <Trainer mode={mode} onExit={()=>setTraining(false)}/>;
-  return <main className="site-shell"><header className="topbar"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links"><a href="#treinar">Treinar</a><a href="#modos">Modos</a><a href="#progresso">Progresso</a></nav><div className="top-actions"><HrcImportButton onImport={setHrcPack} onError={setHrcError} className="ghost-import"/><a className="login-button" href="/login">Entrar</a><button className="ghost-button" onClick={()=>setSetupOpen(true)}>Configurar</button></div></header>
-    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> TREINO DE DECISÃO · TEXAS HOLD’EM</div><h1>Leia o spot.<br/><em>Tome a decisão.</em></h1><p>Treine ranges, pot odds e linhas pós-flop em mãos completas — do pré-flop ao river. Sem ver a resposta antes da hora.</p><div className="hero-actions"><button className="primary-button" onClick={()=>setSetupOpen(true)}><span>▶</span> Começar treinamento</button><HrcImportButton onImport={setHrcPack} onError={setHrcError}/></div>{hrcError&&<div className="import-error">{hrcError}</div>}<div className="hrc-local-note"><span>HRC</span> Complete Export processado localmente no seu navegador</div><div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
+  return <main className="site-shell"><header className="topbar"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links"><a href="#treinar">Treinar</a><a href="#modos">Modos</a><a href="#progresso">Progresso</a></nav><div className="top-actions">{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError} className="ghost-import"/>}<a className="login-button" href="/login">Entrar</a><button className="ghost-button" onClick={()=>setSetupOpen(true)}>Configurar</button></div></header>
+    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> TREINO DE DECISÃO · TEXAS HOLD’EM</div><h1>Leia o spot.<br/><em>Tome a decisão.</em></h1><p>Treine ranges, pot odds e linhas pós-flop em mãos completas — do pré-flop ao river. Sem ver a resposta antes da hora.</p><div className="hero-actions"><button className="primary-button" onClick={()=>setSetupOpen(true)}><span>▶</span> Começar treinamento</button>{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError}/>}</div>{isAdmin&&hrcError&&<div className="import-error">{hrcError}</div>}{isAdmin&&<div className="hrc-local-note"><span>HRC</span> Complete Export processado localmente no seu navegador</div>}<div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
     <section className="mode-strip" id="modos"><p>ESCOLHA SEU JOGO</p><div className="mode-list">{modes.map(item=><button key={item} onClick={()=>{setMode(item);setSetupOpen(true)}}><span>{item==='Torneio'?'♛':item==='Heads-Up'?'⚡':item==='Aleatório'?'↻':'♠'}</span>{item}</button>)}</div></section>
     <section className="promise-grid" id="treinar"><article><span>01</span><h2>Uma mão. Quatro streets.</h2><p>Cartas, stacks e ações permanecem consistentes do pré-flop ao river.</p></article><article><span>02</span><h2>Feedback que ensina.</h2><p>Entenda o porquê da decisão com os conceitos que realmente importam no spot.</p></article><article id="progresso"><span>03</span><h2>Erros viram estudo.</h2><p>Acompanhe acertos e descubra quais fundamentos estão custando mais decisões.</p></article></section>
     {setupOpen&&<Setup mode={mode} setMode={setMode} onClose={()=>setSetupOpen(false)} onStart={()=>{setSetupOpen(false);setTraining(true)}}/>}
