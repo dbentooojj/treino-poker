@@ -1,66 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import {
+  parseHrcPack,
+  positionNames,
+  type HrcAction,
+  type HrcHand,
+  type HrcNode,
+  type HrcPack,
+} from "../lib/hrc-import";
+import { TRAINING_TYPES, trainingTypeLabels, type TrainingSession, type TrainingType } from "../lib/training";
+import { DatabaseTrainer, TrainingSetup } from "./training-experience";
 
 type ActionName = "Fold" | "Check" | "Call" | "Bet" | "Raise" | "All-in";
 type StatState = { answered: number; correct: number; errors: number; topics: Record<string, number> };
-type HrcAction = { type: "F" | "C" | "R"; amount: number; node?: number };
-type HrcSequenceAction = HrcAction & { player: number; street: number };
-type HrcHand = { weight: number; played: number[]; evs: number[] };
-type HrcNode = { player: number; street: number; children: number; sequence: HrcSequenceAction[]; actions: HrcAction[]; hands: Record<string,HrcHand> };
-type HrcSettings = { handdata: { stacks:number[]; blinds:number[]; skipSb:boolean; movingBu:boolean; anteType:string }; eqmodel:{ id:string; raked:boolean } };
-type HrcPack = { name:string; settings:HrcSettings; nodes:HrcNode[]; eligible:number };
 type HrcCandidate = { node:HrcNode; handClass:string; hand:HrcHand };
+type CurrentUser = { id:string; name:string; email:string; role:"admin"|"user" };
 
 const modes = ["Pre-flop", "Pós-flop", "Cash Game", "Torneio", "Short Stack", "Heads-Up", "Aleatório"];
 const allActions: ActionName[] = ["Fold", "Check", "Call", "Bet", "Raise", "All-in"];
-
-function positionNames(count:number) {
-  const maps:Record<number,string[]> = {
-    2:["SB","BB"], 3:["BTN","SB","BB"], 4:["CO","BTN","SB","BB"],
-    5:["HJ","CO","BTN","SB","BB"], 6:["UTG","HJ","CO","BTN","SB","BB"],
-    7:["UTG","UTG+1","HJ","CO","BTN","SB","BB"], 8:["UTG","UTG+1","MP","HJ","CO","BTN","SB","BB"],
-    9:["UTG","UTG+1","UTG+2","MP","HJ","CO","BTN","SB","BB"],
-  };
-  return maps[count] ?? Array.from({length:count},(_,i)=>`P${i+1}`);
-}
-
-async function readHrcZip(file:File):Promise<Record<string,string>> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer), view = new DataView(buffer), decoder = new TextDecoder();
-  const u16=(o:number)=>view.getUint16(o,true), u32=(o:number)=>view.getUint32(o,true);
-  let eocd=-1;
-  for(let i=bytes.length-22;i>=Math.max(0,bytes.length-65557);i--){ if(u32(i)===0x06054b50){eocd=i;break;} }
-  if(eocd<0) throw new Error("ZIP do HRC inválido.");
-  const count=u16(eocd+10), centralOffset=u32(eocd+16), files:Record<string,string>={};
-  let ptr=centralOffset;
-  for(let i=0;i<count;i++){
-    if(u32(ptr)!==0x02014b50) throw new Error("Índice do ZIP inválido.");
-    const method=u16(ptr+10), compressedSize=u32(ptr+20), nameLen=u16(ptr+28), extraLen=u16(ptr+30), commentLen=u16(ptr+32), localOffset=u32(ptr+42);
-    const name=decoder.decode(bytes.subarray(ptr+46,ptr+46+nameLen));
-    const localNameLen=u16(localOffset+26), localExtraLen=u16(localOffset+28), start=localOffset+30+localNameLen+localExtraLen;
-    const compressed=bytes.slice(start,start+compressedSize);
-    let textValue="";
-    if(method===0) textValue=decoder.decode(compressed);
-    else if(method===8){
-      const stream=new Blob([compressed.buffer]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-      textValue=await new Response(stream).text();
-    } else throw new Error(`Compressão ZIP não suportada (${method}).`);
-    if(name==="settings.json" || /^nodes\/\d+\.json$/.test(name)) files[name]=textValue;
-    ptr+=46+nameLen+extraLen+commentLen;
-  }
-  return files;
-}
-
-async function parseHrcPack(file:File):Promise<HrcPack> {
-  const files=await readHrcZip(file);
-  if(!files["settings.json"]) throw new Error("settings.json não encontrado. Use Export Strategies → Complete Export no HRC.");
-  const settings=JSON.parse(files["settings.json"]) as HrcSettings;
-  const nodes=Object.keys(files).filter(n=>/^nodes\/\d+\.json$/.test(n)).sort((a,b)=>Number(a.match(/\d+/)?.[0])-Number(b.match(/\d+/)?.[0])).map(n=>JSON.parse(files[n]) as HrcNode);
-  if(!nodes.length) throw new Error("Nenhuma estratégia foi encontrada neste ZIP.");
-  const eligible=nodes.reduce((sum,node)=>sum+Object.values(node.hands).filter(h=>h.weight>=.01).length,0);
-  return {name:file.name.replace(/\.zip$/i,""),settings,nodes,eligible};
-}
 
 const handStreets = [
   {
@@ -164,6 +123,10 @@ function Trainer({ mode, onExit }: { mode:string; onExit:()=>void }) {
   </main>;
 }
 
+// Protótipo visual anterior mantido isolado durante a migração; o fluxo público usa apenas DatabaseTrainer.
+void Setup;
+void Trainer;
+
 function handCards(handClass:string):[string,string,string,string] {
   const pair=handClass.length===2;
   if(pair) return [handClass[0],"♠",handClass[1],"♥"];
@@ -228,7 +191,7 @@ function HrcTrainer({pack,onExit}:{pack:HrcPack;onExit:()=>void}) {
   }
   const prompt=state.history.length?`${state.history.join(" → ")}. Sua ação com ${candidate.handClass}?`:`Você está no ${state.heroPos} com ${candidate.handClass}. Qual é sua ação?`;
   return <main className="training-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={onExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>HRC SOLVER</span><b>{sourceLabel} · {state.stackTotal} BB · {pack.settings.handdata.stacks.length===2?'Heads-Up':`${pack.settings.handdata.stacks.length}-max`}</b></div><button className="exit-button" onClick={onExit}>← Sair do treino</button></header>
-    <div className="hrc-pack-bar"><span><i>✓</i> {pack.name} importado</span><div><b>{pack.nodes.length}</b> nós de decisão <em>•</em> <b>{pack.eligible}</b> spots elegíveis <em>•</em> arquivo processado localmente</div></div>
+    <div className="hrc-pack-bar"><span><i>✓</i> {pack.name} importado</span><div><b>{pack.nodes.length}</b> nós de decisão <em>•</em> <b>{pack.eligible}</b> spots elegíveis <em>•</em> estudo salvo no banco</div></div>
     <section className="trainer-layout"><div className="practice-column"><div className="table-meta"><span><i/> SPOT HRC · PRÉ-FLOP</span><div>{state.history.map((h,i)=><small key={i}>{h}</small>)}</div></div><HrcTable candidate={candidate} pack={pack}/>
       <div className="decision-panel"><div className="decision-copy"><span>SUA DECISÃO · {state.heroPos}</span><h1>{prompt}</h1><p>Escolha antes de ver a estratégia e o EV do solver.</p></div>
         {choice===null&&<div className={`hrc-action-grid actions-${node.actions.length}`}>{node.actions.map((action,i)=>{const label=hrcActionLabel(action,node,pack);return <button key={`${action.type}-${action.amount}`} onClick={()=>answer(i)}><span>{action.type==="F"?'×':action.type==="C"?'●':action.amount>=pack.settings.handdata.stacks[node.player]?'⚡':'▲'}</span><b>{label}</b><small>{action.type==="R"&&action.amount<pack.settings.handdata.stacks[node.player]?`${Number((action.amount/bb).toFixed(1))} BB`:""}</small></button>})}</div>}
@@ -246,27 +209,37 @@ function HrcImportButton({onImport,onError,className="import-button"}:{onImport:
   const [loading,setLoading]=useState(false);
   async function handleFile(e:React.ChangeEvent<HTMLInputElement>){
     const file=e.target.files?.[0]; if(!file)return; setLoading(true); onError("");
-    try{onImport(await parseHrcPack(file));}catch(error){onError(error instanceof Error?error.message:"Não foi possível ler o export do HRC.");}finally{setLoading(false);e.target.value="";}
+    try{
+      const pack=await parseHrcPack(file);
+      const response=await fetch("/api/studies/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pack)});
+      const result=await response.json() as {error?:string};
+      if(!response.ok)throw new Error(result.error||"Não foi possível salvar o estudo.");
+      onImport(pack);
+    }catch(error){onError(error instanceof Error?error.message:"Não foi possível importar o estudo do HRC.");}finally{setLoading(false);e.target.value="";}
   }
-  return <label className={className}><span>{loading?'…':'⇧'}</span>{loading?'Lendo HRC…':'Importar HRC (.zip)'}<input type="file" accept=".zip,application/zip" onChange={handleFile}/></label>;
+  return <label className={className}><span>{loading?'…':'⇧'}</span>{loading?'Salvando estudo…':'Importar HRC (.zip)'}<input type="file" accept=".zip,application/zip" disabled={loading} onChange={handleFile}/></label>;
 }
 
 export default function Home() {
-  const [setupOpen,setSetupOpen]=useState(false), [mode,setMode]=useState("Torneio"), [training,setTraining]=useState(false), [hrcPack,setHrcPack]=useState<HrcPack|null>(null), [hrcError,setHrcError]=useState(""), [isAdmin,setIsAdmin]=useState(false);
+  const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [hrcPack,setHrcPack]=useState<HrcPack|null>(null), [hrcError,setHrcError]=useState(""), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
   useEffect(()=>{
     let active=true;
-    fetch("/api/admin-status",{cache:"no-store"})
-      .then(response=>response.ok?response.json():{isAdmin:false})
-      .then(data=>{if(active)setIsAdmin(data.isAdmin===true);})
-      .catch(()=>{if(active)setIsAdmin(false);});
+    fetch("/api/auth/me",{cache:"no-store"})
+      .then(async response=>response.ok?await response.json() as {user:CurrentUser|null}:{user:null})
+      .then(data=>{if(active){setCurrentUser(data.user??null);setAuthReady(true);}})
+      .catch(()=>{if(active){setCurrentUser(null);setAuthReady(true);}});
     return()=>{active=false;};
   },[]);
+  const isAdmin=currentUser?.role==="admin";
+  function openTrainingSetup(){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(undefined);setSetupOpen(true);}
+  function openTrainingType(trainingType:TrainingType){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(trainingType);setSetupOpen(true);}
+  async function logout(){await fetch("/api/auth/logout",{method:"POST"});window.location.assign("/");}
   if(hrcPack&&isAdmin)return <HrcTrainer pack={hrcPack} onExit={()=>setHrcPack(null)}/>;
-  if(training)return <Trainer mode={mode} onExit={()=>setTraining(false)}/>;
-  return <main className="site-shell"><header className="topbar"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links"><a href="#treinar">Treinar</a><a href="#modos">Modos</a><a href="#progresso">Progresso</a></nav><div className="top-actions">{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError} className="ghost-import"/>}<a className="login-button" href="/login">Entrar</a><button className="ghost-button" onClick={()=>setSetupOpen(true)}>Configurar</button></div></header>
-    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> TREINO DE DECISÃO · TEXAS HOLD’EM</div><h1>Leia o spot.<br/><em>Tome a decisão.</em></h1><p>Treine ranges, pot odds e linhas pós-flop em mãos completas — do pré-flop ao river. Sem ver a resposta antes da hora.</p><div className="hero-actions"><button className="primary-button" onClick={()=>setSetupOpen(true)}><span>▶</span> Começar treinamento</button>{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError}/>}</div>{isAdmin&&hrcError&&<div className="import-error">{hrcError}</div>}{isAdmin&&<div className="hrc-local-note"><span>HRC</span> Complete Export processado localmente no seu navegador</div>}<div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
-    <section className="mode-strip" id="modos"><p>ESCOLHA SEU JOGO</p><div className="mode-list">{modes.map(item=><button key={item} onClick={()=>{setMode(item);setSetupOpen(true)}}><span>{item==='Torneio'?'♛':item==='Heads-Up'?'⚡':item==='Aleatório'?'↻':'♠'}</span>{item}</button>)}</div></section>
-    <section className="promise-grid" id="treinar"><article><span>01</span><h2>Uma mão. Quatro streets.</h2><p>Cartas, stacks e ações permanecem consistentes do pré-flop ao river.</p></article><article><span>02</span><h2>Feedback que ensina.</h2><p>Entenda o porquê da decisão com os conceitos que realmente importam no spot.</p></article><article id="progresso"><span>03</span><h2>Erros viram estudo.</h2><p>Acompanhe acertos e descubra quais fundamentos estão custando mais decisões.</p></article></section>
-    {setupOpen&&<Setup mode={mode} setMode={setMode} onClose={()=>setSetupOpen(false)} onStart={()=>{setSetupOpen(false);setTraining(true)}}/>}
+  if(trainingSession)return <DatabaseTrainer session={trainingSession} onExit={()=>setTrainingSession(null)}/>;
+  return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal"><a href="#progresso">Progresso</a><Link href="/suporte">Suporte</Link>{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError} className="ghost-import"/>}{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
+    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> EVOLUA SUAS DECISÕES · TEXAS HOLD’EM</div><h1>Pare de adivinhar.<br/><em>Jogue com vantagem.</em></h1><p>Transforme cada spot em uma decisão mais confiante. Treine mãos completas, receba feedback objetivo e leve uma estratégia mais sólida para suas mesas.</p><div className="hero-actions"><button className="primary-button" onClick={openTrainingSetup} disabled={!authReady}><span>▶</span> {currentUser?"Começar treinamento":"Começar agora"}</button>{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError}/>}</div>{isAdmin&&hrcError&&<div className="import-error">{hrcError}</div>}{isAdmin&&<div className="hrc-local-note"><span>HRC</span> Complete Export processado localmente e salvo no banco de dados</div>}<div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
+    <section className="mode-strip" id="modos"><p>TREINOS DE TORNEIO · PRÉ-FLOP</p><div className="mode-list training-mode-list">{TRAINING_TYPES.map((type)=><button key={type} onClick={()=>openTrainingType(type)}><span>{type==='PUSH_FOLD'?'⚡':type==='CALL_VS_SHOVE'?'●':type==='OPEN_FOLD'?'▲':'♠'}</span>{trainingTypeLabels[type]}</button>)}</div></section>
+    <section className="promise-grid" id="treinar"><article><span>01</span><h2>Spots reais do estudo.</h2><p>Stacks, posições e ações vêm dos nodes persistidos do HRC.</p></article><article><span>02</span><h2>Frequências e EVs.</h2><p>Compare sua decisão com a estratégia armazenada para cada classe de mão.</p></article><article id="progresso"><span>03</span><h2>Configuração sem atalhos.</h2><p>O treino só começa quando existe uma combinação compatível no banco.</p></article></section>
+    {setupOpen&&<TrainingSetup preferredType={preferredType} onClose={()=>setSetupOpen(false)} onStarted={(session)=>{setSetupOpen(false);setTrainingSession(session);}}/>}
   </main>;
 }
