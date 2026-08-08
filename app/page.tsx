@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { TRAINING_TYPES, trainingTypeLabels, type TrainingSession, type TrainingType } from "../lib/training";
 import { DatabaseTrainer, TrainingSetup } from "./training-experience";
 
@@ -119,6 +120,7 @@ void Setup;
 void Trainer;
 
 export default function Home() {
+  const router = useRouter();
   const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
   useEffect(()=>{
     let active=true;
@@ -129,10 +131,10 @@ export default function Home() {
     return()=>{active=false;};
   },[]);
   const isAdmin=currentUser?.role==="admin";
-  function openTrainingSetup(){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(undefined);setSetupOpen(true);}
-  function openTrainingType(trainingType:TrainingType){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(trainingType);setSetupOpen(true);}
-  async function logout(){await fetch("/api/auth/logout",{method:"POST"});window.location.assign("/");}
-  if(trainingSession)return <DatabaseTrainer session={trainingSession} onExit={()=>setTrainingSession(null)}/>;
+  function openTrainingSetup(){if(!authReady)return;if(!currentUser){router.push("/login");return;}setPreferredType(undefined);setSetupOpen(true);}
+  function openTrainingType(trainingType:TrainingType){if(!authReady)return;if(!currentUser){router.push("/login");return;}setPreferredType(trainingType);setSetupOpen(true);}
+  async function logout(){await fetch("/api/auth/logout",{method:"POST"});setCurrentUser(null);router.refresh();}
+  if(trainingSession)return <DatabaseTrainer key={trainingSession.id} session={trainingSession} onExit={()=>setTrainingSession(null)} onStarted={setTrainingSession}/>;
   return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal">{currentUser&&<Link href="/progresso">Progresso</Link>}<Link href="/suporte">Suporte</Link>{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
     <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> EVOLUA SUAS DECISÕES · TEXAS HOLD’EM</div><h1>Pare de adivinhar.<br/><em>Jogue com vantagem.</em></h1><p>Transforme cada spot em uma decisão mais confiante. Treine mãos completas, receba feedback objetivo e leve uma estratégia mais sólida para suas mesas.</p><div className="hero-actions"><button className="primary-button" onClick={openTrainingSetup} disabled={!authReady}><span>▶</span> {currentUser?"Começar treinamento":"Começar agora"}</button></div><div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
     <section className="mode-strip" id="modos"><p>TREINOS DE TORNEIO · PRÉ-FLOP</p><div className="mode-list training-mode-list">{TRAINING_TYPES.map((type)=><button key={type} onClick={()=>openTrainingType(type)}><span>{type==='PUSH_FOLD'?'⚡':type==='CALL_VS_SHOVE'?'●':type==='OPEN_FOLD'?'▲':'♠'}</span>{trainingTypeLabels[type]}</button>)}</div></section>

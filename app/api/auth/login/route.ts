@@ -9,7 +9,8 @@ export async function POST(request: Request) {
     if (!user) return Response.json({ error: "E-mail ou senha incorretos." }, { status: 401 });
     const session = await createSession(user.id, payload.remember === true);
     return Response.json({ user }, { headers: { "Set-Cookie": sessionCookie(session.token, session.maxAge) } });
-  } catch {
+  } catch (error) {
+    console.error("[auth/login] falha", error);
     return Response.json({ error: "Não foi possível entrar agora." }, { status: 500 });
   }
 }

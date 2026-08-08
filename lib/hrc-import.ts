@@ -1,7 +1,7 @@
 import type { TrainingAction, TrainingSequenceAction, TrainingType } from "./training";
 
 export type HrcAction = {
-  type: "F" | "C" | "R";
+  type: "F" | "C" | "R" | "X";
   amount: number;
   node?: number;
   metadata: Record<string, unknown>;
@@ -65,6 +65,7 @@ export type HrcStudyImport = {
   ante: number;
   anteType: "NONE" | "ANTE" | "BB_ANTE";
   icmContext: string | null;
+  ignoredNodes: { AUTOMATIC_X: number };
   metadata: Record<string, unknown>;
   nodes: HrcStudyNode[];
 };
@@ -80,6 +81,7 @@ export type HrcImportSummary = {
   nodeCount: number;
   handCount: number;
   counts: Record<TrainingType, number>;
+  ignoredNodes: HrcStudyImport["ignoredNodes"];
 };
 
 const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
@@ -200,6 +202,9 @@ export function toHrcStudyImport(pack: HrcPack): HrcStudyImport {
   const equityModel = inferEquityModel(pack.settings.eqmodel);
   const stackValues = stacks.map((stack) => roundBb(stack / bigBlind));
   const stackBb = stackValues.every((stack) => Math.abs(stack - stackValues[0]) < 0.001) ? stackValues[0] : null;
+  const ignoredNodes = {
+    AUTOMATIC_X: pack.nodes.filter(isAutomaticXNode).length,
+  };
 
   const nodes = pack.nodes.flatMap((node): HrcStudyNode[] => {
     if (node.street !== 0 || !node.actions.length || node.player < 0) return [];
@@ -267,12 +272,14 @@ export function toHrcStudyImport(pack: HrcPack): HrcStudyImport {
     ante,
     anteType,
     icmContext: equityModel === "ICM" ? pack.settings.eqmodel.id || "ICM" : null,
+    ignoredNodes,
     metadata: {
       sourceFormat: "HRC_COMPLETE_EXPORT",
       hrcEquityModel: pack.settings.eqmodel.id,
       hrcRaked: pack.settings.eqmodel.raked,
       hrcNodeCount: pack.nodes.length,
       compatibleNodeCount: nodes.length,
+      ignoredNodes,
       eligibleHands: nodes.reduce((total, node) => total + node.hands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length, 0),
       archiveSizeBytes: pack.archiveSizeBytes,
       hrcSettings: pack.settings.metadata,
@@ -295,11 +302,12 @@ export function summarizeHrcStudy(study: HrcStudyImport): HrcImportSummary {
     nodeCount: study.nodes.length,
     handCount: study.nodes.reduce((total, node) => total + node.hands.length, 0),
     counts,
+    ignoredNodes: study.ignoredNodes,
   };
 }
 
 export function classifyHrcNode(node: HrcNode, stacks: number[]): TrainingType | null {
-  if (node.player < 0 || !node.actions.length) return null;
+  if (node.player < 0 || !node.actions.length || node.actions.some((action) => action.type === "X")) return null;
   const foldActions = node.actions.filter((action) => action.type === "F");
   const callActions = node.actions.filter((action) => action.type === "C");
   const raiseActions = node.actions.filter((action) => action.type === "R");
@@ -432,7 +440,7 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
   const actions = value.actions.map((action) => parseAction(action));
   const sequence = value.sequence.map((action) => {
     const parsed = parseAction(action);
-    if (!isRecord(action) || !Number.isInteger(action.player) || Number(action.player) < 0 || Number(action.player) >= playersCount) {
+    if (parsed.type === "X" || !isRecord(action) || !Number.isInteger(action.player) || Number(action.player) < 0 || Number(action.player) >= playersCount) {
       throw new HrcImportError(`Sequência do node HRC ${sourcePath || index} inválida.`);
     }
     const street = optionalJsonNumber(action.street, 0, "street da sequência");
@@ -442,6 +450,7 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
     throw new HrcImportError(`Estratégia do node HRC ${sourcePath || index} inválida.`);
   }
   const street = optionalJsonNumber(value.street, 0, "street do node");
+  const children = optionalJsonNumber(value.children, 0, "children do node");
   const hands: Record<string, HrcHand> = {};
   for (const [handClass, hand] of Object.entries(value.hands)) {
     if (!isHandClass(handClass)) continue;
@@ -455,13 +464,27 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
     hands[handClass] = { weight, played, evs, metadata: withoutKeys(hand, ["weight", "played", "evs"]) };
   }
   if (actions.length && !Object.keys(hands).length) throw new HrcImportError(`Node ${sourcePath} não contém classes de mãos válidas.`);
+  if (actions.some((action) => action.type === "X")) {
+    const isValidAutomaticX = actions.length === 1
+      && actions[0].type === "X"
+      && actions[0].amount === 0
+      && children === 1
+      && Object.keys(value.hands).length === 169
+      && Object.keys(hands).length === 169
+      && Object.values(hands).every((hand) => hand.played.length === 1
+        && Math.abs(hand.played[0] - 1) <= 0.000001
+        && hand.evs.length === 1);
+    if (!isValidAutomaticX) {
+      throw new HrcImportError(`Node automático X ${sourcePath || index} não segue o formato estrutural esperado.`);
+    }
+  }
   const explicitKey = firstString(value.id, value.nodeId, value.key);
   return {
     nodeKey: (explicitKey || sourcePath).slice(0, 240),
     sourcePath,
     player: Number(value.player),
     street,
-    children: optionalJsonNumber(value.children, 0, "children do node"),
+    children,
     sequence,
     actions,
     hands,
@@ -470,9 +493,11 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
 }
 
 function parseAction(value: unknown): HrcAction {
-  if (!isRecord(value) || !["F", "C", "R"].includes(String(value.type))) throw new HrcImportError("Ação HRC inválida.");
+  if (!isRecord(value) || !["F", "C", "R", "X"].includes(String(value.type))) throw new HrcImportError("Ação HRC inválida.");
   const amount = optionalJsonNumber(value.amount, 0, "valor da ação");
-  if (amount < 0 || (value.type === "R" && amount <= 0)) throw new HrcImportError("Valor de ação HRC inválido.");
+  if (amount < 0 || (value.type === "R" && amount <= 0) || (value.type === "X" && amount !== 0)) {
+    throw new HrcImportError("Valor de ação HRC inválido.");
+  }
   return {
     type: value.type as HrcAction["type"],
     amount,
@@ -486,6 +511,7 @@ function toTrainingAction(action: HrcAction, index: number, node: HrcNode, stack
   const metadata = { ...action.metadata, hrcType: action.type, hrcAmount: action.amount, ...(action.node === undefined ? {} : { hrcChildNode: action.node }) };
   if (action.type === "F") return { id, type: "FOLD", metadata };
   if (action.type === "C") return { id, type: action.amount <= 0 ? "CHECK" : "CALL", metadata };
+  if (action.type !== "R") throw new HrcImportError("Node automático X não pode ser convertido em uma decisão de treinamento.");
   return {
     id,
     type: "RAISE",
@@ -493,6 +519,10 @@ function toTrainingAction(action: HrcAction, index: number, node: HrcNode, stack
     label: isAllInRaise(action, actingPlayer, stacks) ? "All-in" : undefined,
     metadata,
   };
+}
+
+function isAutomaticXNode(node: HrcNode) {
+  return node.actions.length === 1 && node.actions[0].type === "X";
 }
 
 function isAllInRaise(action: Pick<HrcAction, "type" | "amount">, player: number, stacks: number[]) {

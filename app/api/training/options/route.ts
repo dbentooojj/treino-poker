@@ -19,26 +19,17 @@ export async function GET(request: Request) {
 function parseFilters(params: URLSearchParams): TrainingFilters | null {
   const trainingType = params.get("trainingType") || undefined;
   const equityModel = params.get("equityModel") || undefined;
-  const playersRaw = params.get("playersCount");
   const stackRaw = params.get("stackDepthBb");
   const heroPosition = params.get("heroPosition") || undefined;
-  const villainPosition = params.get("villainPosition") || undefined;
-  const icmContext = params.get("icmContext")?.trim() || undefined;
   if (trainingType && !isTrainingType(trainingType)) return null;
   if (equityModel && !isEquityModel(equityModel)) return null;
-  const playersCount = playersRaw ? Number(playersRaw) : undefined;
   const stackDepthBb = stackRaw ? Number(stackRaw) : undefined;
-  if (playersCount !== undefined && (!Number.isInteger(playersCount) || playersCount < 2 || playersCount > 10)) return null;
   if (stackDepthBb !== undefined && (!Number.isFinite(stackDepthBb) || stackDepthBb <= 0)) return null;
   if (heroPosition && !isTrainingPosition(heroPosition)) return null;
-  if (villainPosition && !isTrainingPosition(villainPosition)) return null;
   return {
     trainingType: isTrainingType(trainingType) ? trainingType : undefined,
     equityModel: isEquityModel(equityModel) ? equityModel : undefined,
-    playersCount,
     stackDepthBb,
     heroPosition,
-    villainPosition,
-    icmContext,
   };
 }

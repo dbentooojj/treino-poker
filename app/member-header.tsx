@@ -1,12 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { AuthUser } from "../db/auth";
 
 export default function MemberHeader({ user, active }: { user: AuthUser | null; active?: "account" | "progress" | "support" }) {
+  const router = useRouter();
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
-    window.location.assign("/");
+    router.push("/");
+    router.refresh();
   }
 
   return <header className="topbar member-topbar">

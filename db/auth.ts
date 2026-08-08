@@ -1,4 +1,7 @@
-import { env } from "cloudflare:workers";
+import { and, eq, gt, lte, ne, sql } from "drizzle-orm";
+import { getDb } from "./index";
+import { hasPostgresErrorCode } from "./errors";
+import { authRateLimits, passwordResetTokens, sessions, users } from "./schema";
 
 const SESSION_COOKIE = "rangelab_session";
 const PASSWORD_ITERATIONS = 310_000;
@@ -12,183 +15,125 @@ export type AuthUser = {
   role: "admin" | "user";
 };
 
-type UserRow = AuthUser & {
-  password_hash: string;
-  password_salt: string;
-  password_iterations: number;
+type UserWithPassword = AuthUser & {
+  passwordHash: string;
+  passwordSalt: string;
+  passwordIterations: number;
 };
-
-let schemaPromise: Promise<void> | null = null;
-
-export function ensureAuthSchema() {
-  schemaPromise ??= (async () => {
-    const db = env.DB;
-    if (!db) throw new Error("O banco local de usuários não está disponível.");
-
-    await db.batch([
-      db.prepare(`CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        password_salt TEXT NOT NULL,
-        password_iterations INTEGER NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`),
-      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)"),
-      db.prepare(`CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY NOT NULL,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        expires_at INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        last_used_at INTEGER NOT NULL
-      )`),
-      db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id)"),
-      db.prepare("CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at)"),
-      db.prepare(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
-        id TEXT PRIMARY KEY NOT NULL,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        expires_at INTEGER NOT NULL,
-        used_at INTEGER,
-        created_at INTEGER NOT NULL
-      )`),
-      db.prepare("CREATE INDEX IF NOT EXISTS password_reset_user_id_idx ON password_reset_tokens (user_id)"),
-      db.prepare("CREATE INDEX IF NOT EXISTS password_reset_expires_at_idx ON password_reset_tokens (expires_at)"),
-      db.prepare(`CREATE TABLE IF NOT EXISTS auth_rate_limits (
-        id TEXT PRIMARY KEY NOT NULL,
-        hits INTEGER NOT NULL,
-        window_started_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`),
-      db.prepare("CREATE INDEX IF NOT EXISTS auth_rate_limits_expires_at_idx ON auth_rate_limits (expires_at)"),
-    ]);
-  })().catch((error) => {
-    schemaPromise = null;
-    throw error;
-  });
-  return schemaPromise;
-}
 
 export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
 export async function registerUser(name: string, email: string, password: string) {
-  await ensureAuthSchema();
-  const db = env.DB;
+  const db = getDb();
   const normalizedEmail = normalizeEmail(email);
-  const existing = await db.prepare("SELECT id FROM users WHERE email = ? LIMIT 1").bind(normalizedEmail).first();
-  if (existing) throw new Error("EMAIL_IN_USE");
-
   const { hash, salt } = await hashPassword(password);
   const id = crypto.randomUUID();
-  const now = Date.now();
+  const now = new Date();
+
   try {
-    await db.prepare(`INSERT INTO users
-    (id, name, email, password_hash, password_salt, password_iterations, role, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'user' ELSE 'admin' END, ?, ?)`)
-      .bind(id, name.trim(), normalizedEmail, hash, salt, PASSWORD_ITERATIONS, now, now)
-      .run();
+    const role = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(846213579)`);
+      const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(users);
+      const selectedRole: AuthUser["role"] = count === 0 ? "admin" : "user";
+      await tx.insert(users).values({
+        id,
+        name: name.trim(),
+        email: normalizedEmail,
+        passwordHash: hash,
+        passwordSalt: salt,
+        passwordIterations: PASSWORD_ITERATIONS,
+        role: selectedRole,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return selectedRole;
+    });
+    return { id, name: name.trim(), email: normalizedEmail, role } satisfies AuthUser;
   } catch (error) {
-    if (error instanceof Error && error.message.toLowerCase().includes("unique")) throw new Error("EMAIL_IN_USE");
+    if (hasPostgresErrorCode(error, "23505")) throw new Error("EMAIL_IN_USE");
     throw error;
   }
-  const created = await db.prepare("SELECT role FROM users WHERE id = ?").bind(id).first<{ role: AuthUser["role"] }>();
-  const role = created?.role ?? "user";
-
-  return { id, name: name.trim(), email: normalizedEmail, role } satisfies AuthUser;
 }
 
 export async function authenticateUser(email: string, password: string): Promise<AuthUser | null> {
-  await ensureAuthSchema();
-  const row = await env.DB.prepare(`SELECT id, name, email, role, password_hash, password_salt, password_iterations
-    FROM users WHERE email = ? LIMIT 1`)
-    .bind(normalizeEmail(email))
-    .first<UserRow>();
+  const [row] = await getDb().select({
+    id: users.id,
+    name: users.name,
+    email: users.email,
+    role: users.role,
+    passwordHash: users.passwordHash,
+    passwordSalt: users.passwordSalt,
+    passwordIterations: users.passwordIterations,
+  }).from(users).where(eq(users.email, normalizeEmail(email))).limit(1);
   if (!row) {
     await hashPassword(password);
     return null;
   }
-  const valid = await verifyPassword(password, row.password_salt, row.password_hash, row.password_iterations);
-  if (!valid) return null;
-  return { id: row.id, name: row.name, email: row.email, role: row.role };
+  if (!await verifyPassword(password, row.passwordSalt, row.passwordHash, row.passwordIterations)) return null;
+  return toAuthUser(row);
 }
 
 export async function createSession(userId: string, remember: boolean) {
-  await ensureAuthSchema();
   const token = randomToken(32);
   const id = await hashToken(token);
   const maxAge = SESSION_DAY_SECONDS * (remember ? 30 : 1);
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now),
-    env.DB.prepare("INSERT INTO sessions (id, user_id, expires_at, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(id, userId, now + maxAge * 1000, now, now),
-  ]);
+  const now = new Date();
+  await getDb().transaction(async (tx) => {
+    await tx.delete(sessions).where(lte(sessions.expiresAt, now));
+    await tx.insert(sessions).values({ id, userId, expiresAt: new Date(now.getTime() + maxAge * 1000), createdAt: now, lastUsedAt: now });
+  });
   return { token, maxAge };
 }
 
 export async function getSessionUser(request: Request): Promise<AuthUser | null> {
-  await ensureAuthSchema();
   const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE);
   if (!token) return null;
   const id = await hashToken(token);
-  const now = Date.now();
-  const user = await env.DB.prepare(`SELECT users.id, users.name, users.email, users.role
-    FROM sessions INNER JOIN users ON users.id = sessions.user_id
-    WHERE sessions.id = ? AND sessions.expires_at > ? LIMIT 1`)
-    .bind(id, now)
-    .first<AuthUser>();
+  const now = new Date();
+  const [user] = await getDb().select({ id: users.id, name: users.name, email: users.email, role: users.role })
+    .from(sessions)
+    .innerJoin(users, eq(users.id, sessions.userId))
+    .where(and(eq(sessions.id, id), gt(sessions.expiresAt, now)))
+    .limit(1);
   if (!user) return null;
-  await env.DB.prepare("UPDATE sessions SET last_used_at = ? WHERE id = ?").bind(now, id).run();
+  await getDb().update(sessions).set({ lastUsedAt: now }).where(eq(sessions.id, id));
   return user;
 }
 
 export async function destroySession(request: Request) {
-  await ensureAuthSchema();
   const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE);
-  if (token) await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(await hashToken(token)).run();
+  if (token) await getDb().delete(sessions).where(eq(sessions.id, await hashToken(token)));
 }
 
 export async function createPasswordReset(email: string): Promise<string | null> {
-  await ensureAuthSchema();
-  const user = await env.DB.prepare("SELECT id FROM users WHERE email = ? LIMIT 1")
-    .bind(normalizeEmail(email))
-    .first<{ id: string }>();
+  const [user] = await getDb().select({ id: users.id }).from(users).where(eq(users.email, normalizeEmail(email))).limit(1);
   if (!user) return null;
   const token = randomToken(32);
   const id = await hashToken(token);
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM password_reset_tokens WHERE user_id = ? OR expires_at <= ?").bind(user.id, now),
-    env.DB.prepare("INSERT INTO password_reset_tokens (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)")
-      .bind(id, user.id, now + RESET_TOKEN_TTL_MS, now),
-  ]);
+  const now = new Date();
+  await getDb().transaction(async (tx) => {
+    await tx.delete(passwordResetTokens).where(sql`${passwordResetTokens.userId} = ${user.id} OR ${passwordResetTokens.expiresAt} <= ${now}`);
+    await tx.insert(passwordResetTokens).values({ id, userId: user.id, expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS), createdAt: now });
+  });
   return token;
 }
 
 export async function resetPassword(token: string, password: string) {
-  await ensureAuthSchema();
   const id = await hashToken(token);
-  const now = Date.now();
-  const reset = await env.DB.prepare(`SELECT user_id FROM password_reset_tokens
-    WHERE id = ? AND used_at IS NULL AND expires_at > ? LIMIT 1`)
-    .bind(id, now)
-    .first<{ user_id: string }>();
-  if (!reset) return false;
-  const claim = await env.DB.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?")
-    .bind(now, id, now)
-    .run();
-  if (!claim.meta.changes) return false;
+  const now = new Date();
   const { hash, salt } = await hashPassword(password);
-  await env.DB.batch([
-    env.DB.prepare("UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, updated_at = ? WHERE id = ?")
-      .bind(hash, salt, PASSWORD_ITERATIONS, now, reset.user_id),
-    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(reset.user_id),
-  ]);
-  return true;
+  return getDb().transaction(async (tx) => {
+    const [claimed] = await tx.update(passwordResetTokens)
+      .set({ usedAt: now })
+      .where(and(eq(passwordResetTokens.id, id), sql`${passwordResetTokens.usedAt} IS NULL`, gt(passwordResetTokens.expiresAt, now)))
+      .returning({ userId: passwordResetTokens.userId });
+    if (!claimed) return false;
+    await tx.update(users).set({ passwordHash: hash, passwordSalt: salt, passwordIterations: PASSWORD_ITERATIONS, updatedAt: now }).where(eq(users.id, claimed.userId));
+    await tx.delete(sessions).where(eq(sessions.userId, claimed.userId));
+    return true;
+  });
 }
 
 export type AccountUpdateResult =
@@ -196,76 +141,70 @@ export type AccountUpdateResult =
   | { ok: false; reason: "NOT_FOUND" | "INVALID_PASSWORD" | "EMAIL_IN_USE" };
 
 export async function updateUserProfile(userId: string, name: string, email: string, currentPassword: string): Promise<AccountUpdateResult> {
-  await ensureAuthSchema();
   const normalizedEmail = normalizeEmail(email);
-  const row = await env.DB.prepare(`SELECT id, name, email, role, password_hash, password_salt, password_iterations
-    FROM users WHERE id = ? LIMIT 1`)
-    .bind(userId)
-    .first<UserRow>();
+  const row = await findUserWithPassword(userId);
   if (!row) return { ok: false, reason: "NOT_FOUND" };
-
   if (normalizedEmail !== row.email) {
     const passwordIsValid = currentPassword
-      ? await verifyPassword(currentPassword, row.password_salt, row.password_hash, row.password_iterations)
+      ? await verifyPassword(currentPassword, row.passwordSalt, row.passwordHash, row.passwordIterations)
       : false;
     if (!passwordIsValid) return { ok: false, reason: "INVALID_PASSWORD" };
-    const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1")
-      .bind(normalizedEmail, userId)
-      .first();
+    const [existing] = await getDb().select({ id: users.id }).from(users).where(and(eq(users.email, normalizedEmail), ne(users.id, userId))).limit(1);
     if (existing) return { ok: false, reason: "EMAIL_IN_USE" };
   }
-
   try {
-    await env.DB.prepare("UPDATE users SET name = ?, email = ?, updated_at = ? WHERE id = ?")
-      .bind(name.trim(), normalizedEmail, Date.now(), userId)
-      .run();
+    await getDb().update(users).set({ name: name.trim(), email: normalizedEmail, updatedAt: new Date() }).where(eq(users.id, userId));
   } catch (error) {
-    if (error instanceof Error && error.message.toLowerCase().includes("unique")) return { ok: false, reason: "EMAIL_IN_USE" };
+    if (hasPostgresErrorCode(error, "23505")) return { ok: false, reason: "EMAIL_IN_USE" };
     throw error;
   }
-
   return { ok: true, user: { id: row.id, name: name.trim(), email: normalizedEmail, role: row.role } };
 }
 
 export async function changeUserPassword(userId: string, currentPassword: string, newPassword: string) {
-  await ensureAuthSchema();
-  const row = await env.DB.prepare(`SELECT id, name, email, role, password_hash, password_salt, password_iterations
-    FROM users WHERE id = ? LIMIT 1`)
-    .bind(userId)
-    .first<UserRow>();
+  const row = await findUserWithPassword(userId);
   if (!row) return "NOT_FOUND" as const;
-  if (!await verifyPassword(currentPassword, row.password_salt, row.password_hash, row.password_iterations)) return "INVALID_PASSWORD" as const;
-
+  if (!await verifyPassword(currentPassword, row.passwordSalt, row.passwordHash, row.passwordIterations)) return "INVALID_PASSWORD" as const;
   const { hash, salt } = await hashPassword(newPassword);
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare("UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, updated_at = ? WHERE id = ?")
-      .bind(hash, salt, PASSWORD_ITERATIONS, now, userId),
-    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId),
-  ]);
+  await getDb().transaction(async (tx) => {
+    await tx.update(users).set({ passwordHash: hash, passwordSalt: salt, passwordIterations: PASSWORD_ITERATIONS, updatedAt: new Date() }).where(eq(users.id, userId));
+    await tx.delete(sessions).where(eq(sessions.userId, userId));
+  });
   return "OK" as const;
 }
 
 export async function consumeAuthRateLimit(request: Request, scope: string, discriminator: string, limit: number, windowMs: number) {
-  await ensureAuthSchema();
   const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
   const id = await hashToken(`${scope}:${ip}:${normalizeEmail(discriminator)}`);
-  const now = Date.now();
-  const row = await env.DB.prepare("SELECT hits, window_started_at FROM auth_rate_limits WHERE id = ? LIMIT 1")
-    .bind(id)
-    .first<{ hits: number; window_started_at: number }>();
-  if (!row || now - row.window_started_at >= windowMs) {
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM auth_rate_limits WHERE expires_at <= ?").bind(now),
-      env.DB.prepare(`INSERT INTO auth_rate_limits (id, hits, window_started_at, expires_at) VALUES (?, 1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET hits = 1, window_started_at = excluded.window_started_at, expires_at = excluded.expires_at`)
-        .bind(id, now, now + windowMs),
-    ]);
-    return true;
-  }
-  if (row.hits >= limit) return false;
-  await env.DB.prepare("UPDATE auth_rate_limits SET hits = hits + 1 WHERE id = ?").bind(id).run();
-  return true;
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - windowMs);
+  const expiresAt = new Date(now.getTime() + windowMs);
+  const nowIso = now.toISOString();
+  const windowStartIso = windowStart.toISOString();
+  const db = getDb();
+  const [row] = await db.insert(authRateLimits).values({ id, hits: 1, windowStartedAt: now, expiresAt })
+    .onConflictDoUpdate({
+      target: authRateLimits.id,
+      set: {
+        hits: sql`CASE WHEN ${authRateLimits.windowStartedAt} <= ${windowStartIso}::timestamptz THEN 1 ELSE ${authRateLimits.hits} + 1 END`,
+        windowStartedAt: sql`CASE WHEN ${authRateLimits.windowStartedAt} <= ${windowStartIso}::timestamptz THEN ${nowIso}::timestamptz ELSE ${authRateLimits.windowStartedAt} END`,
+        expiresAt,
+      },
+    }).returning({ hits: authRateLimits.hits });
+  await db.delete(authRateLimits).where(and(lte(authRateLimits.expiresAt, now), ne(authRateLimits.id, id)));
+  return row.hits <= limit;
+}
+
+async function findUserWithPassword(userId: string): Promise<UserWithPassword | undefined> {
+  const [row] = await getDb().select({
+    id: users.id, name: users.name, email: users.email, role: users.role,
+    passwordHash: users.passwordHash, passwordSalt: users.passwordSalt, passwordIterations: users.passwordIterations,
+  }).from(users).where(eq(users.id, userId)).limit(1);
+  return row;
+}
+
+function toAuthUser(row: UserWithPassword): AuthUser {
+  return { id: row.id, name: row.name, email: row.email, role: row.role };
 }
 
 export function isTrustedOrigin(request: Request) {

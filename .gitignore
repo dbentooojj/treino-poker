@@ -32,11 +32,12 @@ dev-server.*.log
 .env*
 !.env.example
 
-# vercel
+# deployment caches
 .vercel
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /.sites-runtime/

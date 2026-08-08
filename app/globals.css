@@ -626,3 +626,57 @@ select { padding:0 10px; outline:0; }
   .progress-summary { grid-template-columns:1fr; }
   .progress-summary article { min-height:104px; }
 }
+
+/* Session queue and report */
+.simplified-setup { width:min(100%,700px); }
+.simplified-setup .setup-field-block { margin-bottom:18px; }
+.model-choice-grid { grid-template-columns:repeat(2,1fr); }
+.setup-select-row { margin-top:18px; }
+.finish-training-button { color:#efb19f; border-color:#57342d; }
+.finish-training-button:hover:not(:disabled) { color:#ffd7cb; border-color:#945343; background:#251311; }
+.session-progress-count { margin-top:14px; color:#dce7e3; font:800 18px var(--font-geist-mono),monospace; text-align:center; }
+.trainer-error { margin-top:12px; }
+
+.report-screen { min-height:100vh; }
+.training-report { width:min(100% - 40px,980px); margin:0 auto; padding:46px 0 70px; }
+.report-hero { padding:34px; border:1px solid #244035; border-radius:16px; background:radial-gradient(circle at 82% 12%,rgba(46,211,136,.12),transparent 35%),#0c1312; }
+.report-hero>span { color:var(--green); font-size:10px; font-weight:800; letter-spacing:1.5px; }
+.report-hero h1 { margin:9px 0 3px; font-size:38px; letter-spacing:-1.2px; }
+.report-hero p { margin:0; color:#91a19b; font-size:15px; }
+.report-hero>div { display:flex; flex-wrap:wrap; gap:7px; margin-top:22px; }
+.report-hero i { padding:7px 10px; border:1px solid #294039; border-radius:7px; background:#101b18; color:#a7b7b1; font-size:10px; font-style:normal; }
+.report-stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:14px 0; }
+.report-stat-grid article { padding:18px; border:1px solid #1c2926; border-radius:11px; background:#0c1112; }
+.report-stat-grid span { display:block; color:#6f7d78; font-size:9px; text-transform:uppercase; letter-spacing:.7px; }
+.report-stat-grid b { display:block; margin-top:5px; font-size:22px; }
+.report-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.report-section { padding:22px; border:1px solid #1d2a27; border-radius:12px; background:#0c1112; }
+.report-section h2 { margin:0 0 18px; color:#cbd7d3; font-size:13px; }
+.report-bars { display:grid; gap:11px; }
+.report-bars>div { display:grid; grid-template-columns:58px 1fr 38px 42px; align-items:center; gap:9px; }
+.report-bars span,.report-bars strong,.report-bars small { font-size:9px; }
+.report-bars span { color:#afbbb7; font-weight:700; }.report-bars strong { color:#e0e9e6; text-align:right; }.report-bars small { color:#66736f; text-align:right; }
+.report-bars i { height:5px; overflow:hidden; border-radius:9px; background:#202a28; }.report-bars i b { display:block; height:100%; border-radius:inherit; background:var(--green); }
+.missed-hands { display:flex; flex-wrap:wrap; gap:8px; }
+.missed-hands>div { min-width:76px; padding:11px; border:1px solid #3d2d29; border-radius:8px; background:#17110f; }
+.missed-hands b { display:block; color:#f0c4b8; font-size:17px; }.missed-hands span { color:#9b7066; font-size:9px; }
+.decision-groups { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+.decision-groups>div { padding:14px; border-radius:8px; background:#101817; }
+.decision-groups span,.decision-groups small { display:block; color:#77857f; font-size:9px; }.decision-groups b { display:block; margin:4px 0; color:#dce6e3; font-size:21px; }
+.report-feedback { display:grid; gap:10px; margin:0; padding:0; list-style:none; }
+.report-feedback li { padding-left:17px; position:relative; color:#aebbb6; font-size:11px; line-height:1.5; }.report-feedback li:before { content:"•"; position:absolute; left:0; color:var(--green); }
+.error-review-list { max-height:260px; overflow:auto; display:grid; gap:6px; }
+.error-review-list>div { display:grid; grid-template-columns:50px 48px 1fr; gap:8px; align-items:center; padding:9px; border-radius:7px; background:#111716; }
+.error-review-list b { color:#e3b4a7; }.error-review-list span { color:#8e9b97; font-size:9px; }.error-review-list small { color:#6b7874; font-size:9px; text-align:right; }
+.report-actions { display:flex; align-items:center; justify-content:flex-end; gap:9px; margin-top:18px; }
+.report-actions button { min-height:44px; padding:0 18px; border:1px solid #2d3d38; border-radius:9px; background:#111817; color:#c4cfcb; font-size:11px; font-weight:800; cursor:pointer; }
+.report-actions button.primary { border-color:#2cd486; background:var(--green); color:#06150e; }.report-actions button:disabled { opacity:.5; cursor:wait; }
+.report-actions>span { color:#697570; font-size:10px; }
+
+@media (max-width:700px) {
+  .training-report { width:calc(100% - 22px); padding-top:24px; }
+  .report-hero { padding:24px 18px; }.report-hero h1 { font-size:30px; }
+  .report-stat-grid { grid-template-columns:repeat(2,1fr); }
+  .report-grid { grid-template-columns:1fr; }
+  .report-actions { align-items:stretch; flex-direction:column; }.report-actions button { width:100%; }
+}

@@ -3,9 +3,9 @@ import { formatBb, trainingTypeLabels, type TrainingType } from "./training";
 export type ProgressSessionRecord = {
   id: string;
   trainingType: TrainingType;
-  playersCount: number;
-  stackBb: number;
-  heroPosition: string;
+  playersCount: number | null;
+  stackBb: number | null;
+  heroPosition: string | null;
   correctAnswers: number;
   totalAnswers: number;
   durationSeconds: number;
@@ -82,12 +82,12 @@ export function buildProgressDashboard(records: ProgressSessionRecord[]): Progre
     performance: {
       training: aggregateBreakdown(sessions, (session) => session.trainingType, (key) => trainingTypeLabels[key as TrainingType]),
       position: aggregateBreakdown(sessions, (session) => normalizePosition(session.heroPosition), positionLabel, positionSort),
-      stack: aggregateBreakdown(sessions, (session) => formatBb(session.stackBb), (key) => `${key}bb`, (left, right) => Number(left.key) - Number(right.key)),
+      stack: aggregateBreakdown(sessions, (session) => session.stackBb === null ? "ALL" : formatBb(session.stackBb), (key) => key === "ALL" ? "Todos os stacks" : `${key}bb`, (left, right) => Number(left.key) - Number(right.key)),
     },
     latestSessions: sessions.slice(0, 10).map((session) => ({
       ...session,
       trainingLabel: trainingTypeLabels[session.trainingType],
-      configuration: `${session.playersCount}-max · ${formatBb(session.stackBb)}bb`,
+      configuration: `${session.playersCount === null ? "Várias mesas" : `${session.playersCount}-max`} · ${session.stackBb === null ? "todos os stacks" : `${formatBb(session.stackBb)}bb`}`,
       accuracy: calculateAccuracy(session.correctAnswers, session.totalAnswers),
     })),
   };
@@ -136,11 +136,13 @@ function aggregateBreakdown(
   return sorter ? items.sort(sorter) : items.sort((left, right) => right.hands - left.hands || left.label.localeCompare(right.label));
 }
 
-function normalizePosition(position: string) {
+function normalizePosition(position: string | null) {
+  if (position === null) return "ALL";
   return position === "BTN" || position === "BU" ? "BTN_BU" : position;
 }
 
 function positionLabel(position: string) {
+  if (position === "ALL") return "Todas as posições";
   return position === "BTN_BU" ? "BTN / BU" : position;
 }
 

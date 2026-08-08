@@ -1,28 +1,41 @@
 import { getSessionUser, isTrustedOrigin } from "../../../../db/auth";
-import { createProgressSession, updateProgressSession } from "../../../../db/progress";
-import { getTrainingSession } from "../../../../db/training";
 import {
-  isEquityModel,
-  isTrainingDifficulty,
-  isTrainingPosition,
-  isTrainingType,
-  requiresVillainPosition,
-  type TrainingConfig,
-} from "../../../../lib/training";
+  NoExercisesError,
+  NoReviewErrorsError,
+  TrainingSessionStateError,
+  answerTrainingSession,
+  createTrainingSession,
+  finishTrainingSession,
+  getTrainingReport,
+  type SessionStartRequest,
+} from "../../../../db/training";
+import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingType, type TrainingConfig } from "../../../../lib/training";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(request: Request) {
+  try {
+    const user = await getSessionUser(request);
+    if (!user) return Response.json({ error: "Faça login para ver o relatório." }, { status: 401 });
+    const sessionId = new URL(request.url).searchParams.get("id");
+    if (!validId(sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
+    return Response.json({ report: await getTrainingReport(user.id, sessionId) }, noStore());
+  } catch (error) {
+    return errorResponse(error, "Não foi possível carregar o relatório.");
+  }
+}
 
 export async function POST(request: Request) {
   try {
     if (!isTrustedOrigin(request)) return Response.json({ error: "Origem da solicitação inválida." }, { status: 403 });
     const user = await getSessionUser(request);
     if (!user) return Response.json({ error: "Faça login para treinar." }, { status: 401 });
-    const payload = await request.json() as Partial<TrainingConfig>;
-    if (!isValidConfig(payload)) return Response.json({ error: "Configuração de treinamento inválida." }, { status: 400 });
-    const nodes = await getTrainingSession(payload);
-    if (!nodes.length) return Response.json({ config: payload, nodes }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
-    const progressSession = await createProgressSession(user.id, payload);
-    return Response.json({ progressSessionId: progressSession.id, startedAt: progressSession.startedAt, config: payload, nodes }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
-  } catch {
-    return Response.json({ error: "Não foi possível iniciar o treinamento." }, { status: 500 });
+    const payload = await request.json() as unknown;
+    const parsed = parseStartRequest(payload);
+    if (!parsed) return Response.json({ error: "Configuração de treinamento inválida." }, { status: 400 });
+    return Response.json(await createTrainingSession(user.id, parsed), noStore());
+  } catch (error) {
+    return errorResponse(error, "Não foi possível iniciar o treinamento.");
   }
 }
 
@@ -30,25 +43,49 @@ export async function PATCH(request: Request) {
   try {
     if (!isTrustedOrigin(request)) return Response.json({ error: "Origem da solicitação inválida." }, { status: 403 });
     const user = await getSessionUser(request);
-    if (!user) return Response.json({ error: "Faça login para salvar o progresso." }, { status: 401 });
-    const payload = await request.json() as { sessionId?: unknown; answerCorrect?: unknown; durationSeconds?: unknown; completed?: unknown };
-    if (typeof payload.sessionId !== "string" || payload.sessionId.length > 100) return Response.json({ error: "Sessão inválida." }, { status: 400 });
-    if (payload.answerCorrect !== undefined && typeof payload.answerCorrect !== "boolean") return Response.json({ error: "Resposta inválida." }, { status: 400 });
-    if (!Number.isFinite(payload.durationSeconds) || Number(payload.durationSeconds) < 0) return Response.json({ error: "Duração inválida." }, { status: 400 });
-    if (payload.completed !== undefined && typeof payload.completed !== "boolean") return Response.json({ error: "Estado inválido." }, { status: 400 });
-    const updated = await updateProgressSession(user.id, payload.sessionId, payload.answerCorrect as boolean | undefined, Number(payload.durationSeconds), payload.completed === true);
-    return updated ? Response.json({ ok: true }) : Response.json({ error: "Sessão não encontrada." }, { status: 404 });
-  } catch {
-    return Response.json({ error: "Não foi possível salvar o progresso." }, { status: 500 });
+    if (!user) return Response.json({ error: "Faça login para salvar o treino." }, { status: 401 });
+    const payload = await request.json() as Record<string, unknown>;
+    if (!validId(payload.sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
+    if (payload.operation === "FINISH") return Response.json({ report: await finishTrainingSession(user.id, payload.sessionId) }, noStore());
+    if (payload.operation !== "ANSWER" || !validId(payload.trainingNodeId) || !validId(payload.trainingHandId) || typeof payload.selectedAction !== "string" || payload.selectedAction.length > 100) {
+      return Response.json({ error: "Resposta inválida." }, { status: 400 });
+    }
+    return Response.json(await answerTrainingSession(user.id, {
+      sessionId: payload.sessionId,
+      trainingNodeId: payload.trainingNodeId,
+      trainingHandId: payload.trainingHandId,
+      selectedAction: payload.selectedAction,
+    }), noStore());
+  } catch (error) {
+    return errorResponse(error, "Não foi possível salvar a resposta.");
   }
 }
 
-function isValidConfig(value: Partial<TrainingConfig>): value is TrainingConfig {
-  if (!isTrainingType(value.trainingType) || !isEquityModel(value.equityModel) || !isTrainingDifficulty(value.difficulty)) return false;
-  if (!Number.isInteger(value.playersCount) || (value.playersCount ?? 0) < 2 || (value.playersCount ?? 0) > 10) return false;
-  if (!Number.isFinite(value.stackDepthBb) || (value.stackDepthBb ?? 0) <= 0) return false;
-  if (!isTrainingPosition(value.heroPosition)) return false;
-  if (requiresVillainPosition(value.trainingType) && !isTrainingPosition(value.villainPosition)) return false;
-  if (value.equityModel === "ICM" && !value.icmContext?.trim()) return false;
-  return true;
+function parseStartRequest(value: unknown): SessionStartRequest | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  if (payload.mode === "REPEAT" || payload.mode === "REVIEW_ERRORS") {
+    return validId(payload.sourceSessionId) ? { mode: payload.mode, sourceSessionId: payload.sourceSessionId } : null;
+  }
+  const config = payload.config as Partial<TrainingConfig> | undefined;
+  if (!config || !isTrainingType(config.trainingType) || !isEquityModel(config.equityModel) || !isQuestionCount(config.targetQuestions)) return null;
+  if (config.stackDepthBb !== undefined && (!Number.isFinite(config.stackDepthBb) || config.stackDepthBb <= 0)) return null;
+  if (config.heroPosition !== undefined && !isTrainingPosition(config.heroPosition)) return null;
+  return { mode: "START", config: {
+    trainingType: config.trainingType,
+    equityModel: config.equityModel,
+    stackDepthBb: config.stackDepthBb,
+    heroPosition: config.heroPosition,
+    targetQuestions: config.targetQuestions,
+  } };
+}
+
+function validId(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value); }
+function noStore() { return { headers: { "Cache-Control": "private, no-store, max-age=0" } }; }
+
+function errorResponse(error: unknown, fallback: string) {
+  if (error instanceof NoReviewErrorsError) return Response.json({ error: error.message }, { status: 409 });
+  if (error instanceof NoExercisesError) return Response.json({ error: error.message }, { status: 404 });
+  if (error instanceof TrainingSessionStateError) return Response.json({ error: error.message }, { status: 409 });
+  return Response.json({ error: fallback }, { status: 500 });
 }

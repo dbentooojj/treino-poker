@@ -29,6 +29,7 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
   const [importOpen, setImportOpen] = useState(false);
   const [adminData, setAdminData] = useState(data);
   const [importing, setImporting] = useState(false);
+  const [updatingStudyId, setUpdatingStudyId] = useState<string | null>(null);
   const [importError, setImportError] = useState("");
   const [importReport, setImportReport] = useState<HrcImportSummary | null>(null);
 
@@ -67,6 +68,26 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
     }
   }
 
+  async function updatePublication(study: AdminStudy) {
+    if (updatingStudyId) return;
+    setUpdatingStudyId(study.id);
+    setImportError("");
+    try {
+      const response = await fetch(`/api/studies/${study.id}/publication`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ published: !study.isPublished }),
+      });
+      const result = await response.json() as { data?: StudiesAdminData; error?: string };
+      if (!response.ok || !result.data) throw new Error(result.error || "Não foi possível alterar a publicação.");
+      setAdminData(result.data);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "Não foi possível alterar a publicação.");
+    } finally {
+      setUpdatingStudyId(null);
+    }
+  }
+
   return <main className="admin-shell">
     <header className="admin-topbar">
       <Link className="brand" href="/" aria-label="Voltar para o RangeLab">
@@ -92,15 +113,16 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
         <small>{modelLabels[importReport.equityModel]} · {importReport.playersCount}-max · {importReport.stackBb === null ? "stacks variados" : `${formatNumber(importReport.stackBb)} BB`} · {formatAnte(importReport)}</small>
         <small>{importReport.counts.PUSH_FOLD} Push/Fold · {importReport.counts.CALL_VS_SHOVE} Call vs Shove · {importReport.counts.OPEN_FOLD} Open/Fold · {importReport.counts.VS_OPEN} Vs Open</small>
       </div><button onClick={() => setImportReport(null)} aria-label="Fechar aviso">×</button></div>}
+      {importError && !importOpen && <div className="admin-import-error" role="alert">{importError}</div>}
 
       <div className="admin-summary" aria-label="Resumo dos estudos">
         <article><span>ESTUDOS</span><strong>{adminData.summary.studies}</strong><small>Total cadastrado</small></article>
-        <article><span>ATIVOS</span><strong>{adminData.summary.active}</strong><small>Disponíveis para treino</small></article>
+        <article><span>PUBLICADOS</span><strong>{adminData.summary.published}</strong><small>Disponíveis para treino</small></article>
         <article><span>SPOTS</span><strong>{adminData.summary.spots}</strong><small>Nodes cadastrados</small></article>
       </div>
 
       <section className="studies-panel" aria-labelledby="studies-list-title">
-        <div className="studies-panel-heading"><div><h2 id="studies-list-title">Estudos importados</h2><p>Pacotes HRC disponíveis na plataforma.</p></div><span>{adminData.summary.studies} {adminData.summary.studies === 1 ? "estudo" : "estudos"}</span></div>
+        <div className="studies-panel-heading"><div><h2 id="studies-list-title">Estudos importados</h2><p>Pacotes HRC armazenados; publique somente após revisar.</p></div><span>{adminData.summary.studies} {adminData.summary.studies === 1 ? "estudo" : "estudos"}</span></div>
         {adminData.studies.length > 0 ? <div className="studies-table-scroll"><table className="studies-table">
           <thead><tr><th>Nome</th><th>Modelo</th><th>Mesa</th><th>Stack</th><th>Ante</th><th>Spots</th><th>Status</th><th>Importado em</th><th>Ações</th></tr></thead>
           <tbody>{adminData.studies.map((study) => <tr key={study.id}>
@@ -110,14 +132,14 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
             <td>{study.stackBb === null ? "—" : `${formatNumber(study.stackBb)} BB`}</td>
             <td>{study.anteType === "NONE" ? anteLabels.NONE : `${anteLabels[study.anteType]} ${formatNumber(study.anteBb)} BB`}</td>
             <td>{study.spotCount}</td>
-            <td><span className={`study-status ${study.status === "ACTIVE" ? "active" : "inactive"}`}><i />{study.status === "ACTIVE" ? "Ativo" : "Inativo"}</span></td>
+            <td><span className={`study-status ${study.isPublished ? "active" : "inactive"}`}><i />{study.status === "PUBLISHED" ? "Publicado" : study.status === "ARCHIVED" ? "Arquivado" : "Importado"}</span></td>
             <td>{formatDate(study.importedAt)}</td>
-            <td><div className="study-actions" aria-label={`Ações para ${study.name}`}><button disabled title="Disponível na próxima etapa">Visualizar</button><button disabled title="Disponível na próxima etapa">{study.status === "ACTIVE" ? "Desativar" : "Ativar"}</button><button className="danger" disabled title="Disponível na próxima etapa">Excluir</button></div></td>
+            <td><div className="study-actions" aria-label={`Ações para ${study.name}`}><button disabled title="Disponível na próxima etapa">Visualizar</button><button disabled={updatingStudyId === study.id} onClick={() => updatePublication(study)}>{updatingStudyId === study.id ? "Salvando…" : study.isPublished ? "Despublicar" : "Publicar"}</button><button className="danger" disabled title="Disponível na próxima etapa">Excluir</button></div></td>
           </tr>)}</tbody>
         </table></div> : <div className="studies-empty">
           <div className="studies-empty-icon" aria-hidden="true"><span>HRC</span><i>＋</i></div>
           <h2>Nenhum estudo HRC importado ainda.</h2>
-          <p>Importe seu primeiro estudo para disponibilizar spots nos treinamentos.</p>
+          <p>Importe seu primeiro estudo e publique-o após a revisão para disponibilizar seus spots.</p>
           <button className="admin-import-button secondary" onClick={() => { setImportError(""); setImportOpen(true); }}>Importar estudo</button>
         </div>}
       </section>

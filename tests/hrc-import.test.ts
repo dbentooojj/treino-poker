@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
 import { deflateRawSync } from "node:zlib";
-import { parseHrcPack, summarizeHrcStudy, toHrcStudyImport } from "../lib/hrc-import";
+import { HrcImportError, parseHrcPack, summarizeHrcStudy, toHrcStudyImport } from "../lib/hrc-import";
 
 const settings = {
   handdata: {
@@ -31,6 +31,20 @@ const callNode = {
   sequence: [{ player: 0, street: 0, type: "R", amount: 1_000 }],
   actions: [{ type: "F", amount: 0 }, { type: "C", amount: 900 }],
   hands: { AKo: { weight: 0.75, played: [0.4, 0.6], evs: [-0.2, 0.1] } },
+};
+
+const automaticXHands = Object.fromEntries(allHandClasses().map((handClass) => [
+  handClass,
+  { weight: 1, played: [1], evs: [10.5] },
+]));
+
+const automaticXNode = {
+  player: 1,
+  street: 0,
+  children: 1,
+  sequence: [{ player: 0, street: 0, type: "F", amount: 0 }],
+  actions: [{ type: "X", amount: 0 }],
+  hands: automaticXHands,
 };
 
 test("aceita um Complete Export válido e preserva estratégia, EVs e metadados", async () => {
@@ -66,6 +80,53 @@ test("aceita o método deflate usado por ZIPs reais", async () => {
     "nodes/0.json": JSON.stringify(pushNode),
   }, true);
   assert.equal((await parseHrcPack(file)).nodes.length, 1);
+});
+
+test("aceita X automático, ignora o node estrutural e registra ignoredNodes.AUTOMATIC_X", async () => {
+  const file = zipFile({
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(pushNode),
+    "nodes/1.json": JSON.stringify(automaticXNode),
+  });
+  const pack = await parseHrcPack(file);
+  const study = toHrcStudyImport(pack);
+  const summary = summarizeHrcStudy(study);
+
+  assert.equal(pack.nodes.length, 2);
+  assert.equal(study.nodes.length, 1);
+  assert.deepEqual(study.ignoredNodes, { AUTOMATIC_X: 1 });
+  assert.deepEqual(study.metadata.ignoredNodes, { AUTOMATIC_X: 1 });
+  assert.deepEqual(summary.ignoredNodes, { AUTOMATIC_X: 1 });
+});
+
+test("rejeita X que não segue integralmente o padrão automático", async (context) => {
+  const invalidNodes = [
+    { name: "amount diferente de zero", node: { ...automaticXNode, actions: [{ type: "X", amount: 1 }] } },
+    { name: "mais de um filho", node: { ...automaticXNode, children: 2 } },
+    {
+      name: "menos de 169 mãos",
+      node: { ...automaticXNode, hands: Object.fromEntries(Object.entries(automaticXHands).slice(0, 168)) },
+    },
+    {
+      name: "frequência diferente de 100%",
+      node: { ...automaticXNode, hands: { ...automaticXHands, AA: { weight: 1, played: [0.5], evs: [10.5] } } },
+    },
+    {
+      name: "vetor com decisão adicional",
+      node: { ...automaticXNode, hands: { ...automaticXHands, AA: { weight: 1, played: [1, 0], evs: [10.5, 0] } } },
+    },
+  ];
+
+  for (const { name, node } of invalidNodes) {
+    await context.test(name, async () => {
+      const file = zipFile({
+        "settings.json": JSON.stringify(settings),
+        "nodes/0.json": JSON.stringify(pushNode),
+        "nodes/1.json": JSON.stringify(node),
+      });
+      await assert.rejects(parseHrcPack(file), HrcImportError);
+    });
+  }
 });
 
 test("bloqueia path traversal dentro do ZIP", async () => {
@@ -123,6 +184,17 @@ test("não confunde open raise com shove", async () => {
 function zipFile(entries: Record<string, string>, compressed = false) {
   const bytes = createZip(entries, compressed);
   return new File([bytes], "study.zip", { type: "application/zip" }) as unknown as Parameters<typeof parseHrcPack>[0];
+}
+
+function allHandClasses() {
+  const ranks = [..."AKQJT98765432"];
+  const hands = [...ranks.map((rank) => `${rank}${rank}`)];
+  for (let first = 0; first < ranks.length; first++) {
+    for (let second = first + 1; second < ranks.length; second++) {
+      hands.push(`${ranks[first]}${ranks[second]}s`, `${ranks[first]}${ranks[second]}o`);
+    }
+  }
+  return hands;
 }
 
 function createZip(entries: Record<string, string>, compressed: boolean) {

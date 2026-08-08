@@ -18,6 +18,7 @@ export async function POST(request: Request) {
     return Response.json({ user }, { status: 201, headers: { "Set-Cookie": sessionCookie(session.token, session.maxAge) } });
   } catch (error) {
     if (error instanceof Error && error.message === "EMAIL_IN_USE") return Response.json({ error: "Este e-mail já está cadastrado." }, { status: 409 });
+    console.error("[auth/register] falha", error);
     return Response.json({ error: "Não foi possível criar a conta." }, { status: 500 });
   }
 }

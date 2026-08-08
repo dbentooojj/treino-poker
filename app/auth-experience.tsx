@@ -2,11 +2,13 @@
 
 import { FormEvent, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordPolicyError } from "../lib/password-policy";
 
 type AuthMode = "login" | "recovery" | "register" | "reset";
 
 export default function AuthExperience({ mode, token = "" }: { mode: AuthMode; token?: string }) {
+  const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -53,7 +55,8 @@ export default function AuthExperience({ mode, token = "" }: { mode: AuthMode; t
       } else if (isReset) {
         setSubmitted(true);
       } else {
-        window.location.href = "/";
+        router.push("/");
+        router.refresh();
       }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível concluir esta ação.");
