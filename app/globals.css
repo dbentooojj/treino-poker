@@ -680,3 +680,180 @@ select { padding:0 10px; outline:0; }
   .report-grid { grid-template-columns:1fr; }
   .report-actions { align-items:stretch; flex-direction:column; }.report-actions button { width:100%; }
 }
+
+/* Poker tools */
+.tools-shell { background:radial-gradient(circle at 32% 4%,rgba(31,156,100,.1),transparent 27%),radial-gradient(circle at 88% 18%,rgba(217,172,85,.055),transparent 25%),#080b0c; }
+.tools-content { width:min(100% - 48px,1240px); margin:0 auto; padding:54px 0 90px; }
+.tools-heading { max-width:720px; margin-bottom:34px; }
+.tools-heading>span { color:var(--gold); font:750 9px var(--font-geist-mono),monospace; letter-spacing:1.8px; }
+.tools-heading h1 { margin:11px 0 12px; font-size:clamp(38px,4.6vw,57px); line-height:1.03; letter-spacing:-2.6px; }
+.tools-heading h1 em { color:var(--green); font-style:normal; }
+.tools-heading p { max-width:620px; margin:0; color:#798783; font-size:13px; line-height:1.7; }
+.poker-tools-grid { display:grid; grid-template-columns:minmax(0,2.05fr) minmax(290px,1fr); gap:16px; align-items:start; }
+.poker-tool-card { min-width:0; overflow:hidden; border:1px solid #202d29; border-radius:16px; background:linear-gradient(150deg,rgba(15,22,21,.99),rgba(9,14,14,.99)); box-shadow:0 24px 70px rgba(0,0,0,.18); }
+.equity-calculator-card { padding:25px; }
+.pot-odds-card { position:sticky; top:16px; padding:25px; }
+.tool-card-heading { display:flex; align-items:flex-start; gap:14px; padding-bottom:21px; border-bottom:1px solid #1b2824; }
+.tool-card-heading .tool-icon { width:39px; height:39px; flex:0 0 auto; display:grid; place-items:center; border:1px solid #2a7953; border-radius:10px; background:#10271d; color:#54df9b; font:21px Georgia,serif; box-shadow:0 0 24px rgba(34,201,122,.08); }
+.tool-card-heading .tool-icon.gold { border-color:#695635; background:#211b11; color:#e1b860; font:800 14px var(--font-geist-mono),monospace; }
+.tool-card-heading>div>span { color:#4ed693; font:750 8px var(--font-geist-mono),monospace; letter-spacing:1.4px; }
+.tool-card-heading h2 { margin:6px 0 5px; font-size:18px; letter-spacing:-.4px; }
+.tool-card-heading p { margin:0; color:#66746f; font-size:10px; line-height:1.5; }
+.tool-card-heading.compact h2 { font-size:17px; }
+.hand-selector { padding:20px 0 5px; display:grid; gap:12px; }
+.hand-row { min-width:0; display:grid; grid-template-columns:105px minmax(0,1fr) auto; gap:14px; align-items:center; }
+.hand-row-label span,.hand-row-label small { display:block; }
+.hand-row-label span { color:#aebbb6; font:750 8px var(--font-geist-mono),monospace; letter-spacing:1.2px; }
+.hand-row-label small { margin-top:5px; color:#52615c; font-size:8px; line-height:1.35; }
+.card-slot-row { min-width:0; display:flex; gap:7px; }
+.tool-card-slot { width:56px; height:76px; position:relative; flex:0 0 auto; border:1px solid #2a3733; border-radius:9px; background:#0a0f0f; transition:.16s; }
+.tool-card-slot.selected { border-color:#30d184; box-shadow:0 0 0 2px rgba(48,209,132,.13),0 0 26px rgba(39,191,117,.12); }
+.tool-card-face { width:100%; height:100%; padding:7px; display:flex; flex-direction:column; align-items:flex-start; border:0; border-radius:8px; background:linear-gradient(145deg,#eef2ed,#dce3df); color:#17201d; cursor:pointer; font-family:Georgia,serif; }
+.tool-card-face b { font-size:18px; line-height:1; }
+.tool-card-face span { margin-top:1px; font-size:22px; line-height:1; }
+.tool-card-slot.suit-h .tool-card-face,.tool-card-slot.suit-d .tool-card-face { color:#c43f48; }
+.tool-card-slot.empty .tool-card-face { align-items:center; justify-content:center; border:1px dashed #2b3a36; background:#0c1211; color:#53635e; font-family:var(--font-geist-sans),Arial,sans-serif; }
+.tool-card-slot.empty .tool-card-face b { font-size:19px; font-weight:500; }
+.tool-card-slot.empty .tool-card-face small { margin-top:4px; color:#42514c; font-size:6px; text-transform:uppercase; }
+.tool-card-remove { width:18px; height:18px; position:absolute; right:-6px; top:-6px; display:grid; place-items:center; padding:0; border:1px solid #4b5c56; border-radius:50%; background:#111a18; color:#a9b6b1; cursor:pointer; font-size:12px; line-height:1; }
+.tool-card-remove:hover { border-color:#97604f; color:#f2a892; }
+.swap-hands-button { min-height:32px; padding:0 9px; display:flex; align-items:center; gap:6px; border:1px solid #2a3834; border-radius:8px; background:#0c1211; color:#798782; cursor:pointer; font-size:9px; }
+.swap-hands-button:first-letter { color:var(--gold); }
+.swap-hands-button:disabled { cursor:not-allowed; opacity:.35; }
+.board-slots { flex-wrap:wrap; }
+.card-picker { margin-top:16px; padding:17px; border:1px solid #1e2c28; border-radius:12px; background:#090f0e; }
+.card-picker-heading,.equity-result-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.card-picker-heading span,.equity-result-heading span { color:#4bce8c; font:750 7px var(--font-geist-mono),monospace; letter-spacing:1.2px; }
+.card-picker-heading h3,.equity-result-heading h3 { margin:4px 0 0; font-size:12px; }
+.card-picker-heading>small,.equity-result-heading>small { color:#4d5b57; font-size:8px; text-align:right; }
+.card-picker-table { display:grid; gap:5px; }
+.card-picker-row { min-width:0; display:grid; grid-template-columns:21px minmax(0,1fr); gap:7px; align-items:center; }
+.picker-suit { font:18px Georgia,serif; text-align:center; }
+.card-picker-row.suit-h .picker-suit,.card-picker-row.suit-d .picker-suit { color:#d95a61; }
+.card-picker-row.suit-s .picker-suit { color:#cdd7d3; }
+.card-picker-row.suit-c .picker-suit { color:#55bb85; }
+.card-picker-row>div { min-width:0; display:grid; grid-template-columns:repeat(13,minmax(0,1fr)); gap:4px; }
+.card-picker-row button { min-width:0; height:37px; padding:3px 1px; display:flex; flex-direction:column; align-items:center; justify-content:center; border:1px solid #293733; border-radius:6px; background:#111817; color:#cbd5d1; cursor:pointer; transition:.12s; }
+.card-picker-row button span { font-size:10px; font-weight:800; line-height:1; }
+.card-picker-row button small { margin-top:2px; font:9px Georgia,serif; line-height:1; }
+.card-picker-row.suit-h button small,.card-picker-row.suit-d button small { color:#d95a61; }
+.card-picker-row.suit-c button small { color:#55bb85; }
+.card-picker-row button:hover:not(:disabled) { z-index:1; border-color:#33bd7b; background:#14271f; color:#fff; transform:translateY(-1px); }
+.card-picker-row button:disabled { border-color:#1a2321; background:#0c1110; color:#313b38; cursor:not-allowed; opacity:.58; }
+.card-picker-row button:disabled small { color:#303b37; }
+.equity-controls { margin-top:14px; display:grid; grid-template-columns:auto 116px auto minmax(155px,1fr); gap:8px; align-items:center; }
+.equity-controls>label { color:#5d6c67; font-size:8px; line-height:1.25; }
+.equity-controls select,.clear-tools-button,.calculate-equity-button { min-height:39px; border-radius:8px; font-size:9px; }
+.equity-controls select { width:100%; padding:0 9px; border:1px solid #293733; background:#0e1514; color:#aebbb6; }
+.clear-tools-button { padding:0 12px; border:1px solid #303b38; background:#0d1312; color:#74817d; cursor:pointer; }
+.calculate-equity-button { display:flex; align-items:center; justify-content:center; gap:10px; padding:0 14px; border:1px solid #32d58a; background:linear-gradient(180deg,#2bd887,#1dbf73); color:#06140d; cursor:pointer; font-weight:800; box-shadow:0 9px 28px rgba(31,193,116,.11); }
+.calculate-equity-button:disabled { cursor:not-allowed; opacity:.4; filter:saturate(.4); box-shadow:none; }
+.calculate-equity-button i { width:13px; height:13px; border:2px solid rgba(4,23,14,.35); border-top-color:#06140d; border-radius:50%; animation:setup-spin .7s linear infinite; }
+.calculator-hint,.calculation-status,.calculator-error { margin:10px 0 0; font-size:9px; line-height:1.5; }
+.calculator-hint { color:#586762; }
+.calculation-status { color:#71b897; }
+.calculator-error { padding:9px 10px; border:1px solid #61372f; border-radius:7px; background:#231411; color:#df8d78; }
+.equity-result { margin-top:18px; padding:19px; border:1px solid #274437; border-radius:12px; background:radial-gradient(circle at 16% 0,rgba(38,204,127,.09),transparent 30%),#0a1210; }
+.equity-result-heading { margin-bottom:17px; }
+.equity-headlines { display:grid; grid-template-columns:1fr .8fr 1fr; gap:7px; }
+.equity-headlines>div { min-width:0; padding:13px; border:1px solid #20322c; border-radius:9px; background:#0d1714; }
+.equity-headlines>div:last-child { text-align:right; }
+.equity-headlines span,.equity-headlines small { display:block; color:#66756f; font:700 7px var(--font-geist-mono),monospace; letter-spacing:.8px; }
+.equity-headlines strong { display:block; margin:5px 0 3px; color:#55e09c; font-size:23px; letter-spacing:-.8px; }
+.equity-headlines>div:last-child strong { color:#e1b75e; }
+.equity-headlines .tie-headline { text-align:center; background:#0b1211; }
+.equity-headlines .tie-headline strong { color:#aebbb7; font-size:18px; }
+.equity-bar { height:9px; margin-top:16px; overflow:hidden; border-radius:20px; background:linear-gradient(90deg,#1e1710,#9f793b); box-shadow:inset 0 0 0 1px #2b352f; }
+.equity-bar i { height:100%; display:block; border-radius:inherit; background:linear-gradient(90deg,#149b5d,#35db8d); }
+.equity-bar-labels { display:flex; justify-content:space-between; margin-top:6px; color:#71807a; font-size:7px; }
+.equity-breakdown { margin-top:15px; display:grid; grid-template-columns:repeat(3,1fr); border:1px solid #1c2b27; border-radius:8px; overflow:hidden; }
+.equity-breakdown>div { padding:9px; border-left:1px solid #1c2b27; background:#0b1210; text-align:center; }
+.equity-breakdown>div:first-child { border-left:0; }
+.equity-breakdown span,.equity-breakdown b { display:block; }
+.equity-breakdown span { color:#52615c; font-size:7px; }
+.equity-breakdown b { margin-top:3px; color:#bdc9c4; font-size:11px; }
+.equity-cards-summary { margin:14px 0 0; padding-top:13px; display:grid; grid-template-columns:repeat(3,1fr); gap:10px; border-top:1px solid #1c2b27; }
+.equity-cards-summary div { min-width:0; }
+.equity-cards-summary dt { color:#53625d; font:700 7px var(--font-geist-mono),monospace; text-transform:uppercase; }
+.equity-cards-summary dd { margin:5px 0 0; color:#d6e0dc; font:700 11px var(--font-geist-mono),monospace; }
+.unit-switch { width:100%; margin:19px 0 17px; padding:3px; display:grid; grid-template-columns:1fr 1fr; border:1px solid #273530; border-radius:9px; background:#090f0e; }
+.unit-switch button { min-height:32px; border:0; border-radius:6px; background:transparent; color:#5f6e69; cursor:pointer; font-size:9px; font-weight:800; }
+.unit-switch button.active { background:#1b2d25; color:#54d897; box-shadow:inset 0 0 0 1px #2b6348; }
+.pot-inputs { display:grid; gap:7px; }
+.pot-inputs>label { margin-top:3px; color:#83908c; font-size:9px; font-weight:650; }
+.pot-inputs>div { min-height:45px; display:flex; align-items:center; border:1px solid #2a3834; border-radius:8px; background:#0d1413; }
+.pot-inputs input { min-width:0; width:100%; padding:0 13px; border:0; outline:0; background:transparent; color:#e7efec; font:700 14px var(--font-geist-mono),monospace; }
+.pot-inputs>div>span { min-width:47px; padding:0 10px; border-left:1px solid #2a3834; color:#8a9993; font:700 9px var(--font-geist-mono),monospace; text-align:center; }
+.pot-odds-result { margin-top:18px; padding:19px; border:1px solid #675535; border-radius:11px; background:radial-gradient(circle at 85% 0,rgba(218,173,85,.09),transparent 38%),#15130e; }
+.pot-odds-result>span { color:#a98b50; font:750 8px var(--font-geist-mono),monospace; letter-spacing:1.2px; }
+.pot-odds-result>strong { display:block; margin:7px 0 15px; color:#e5bc65; font-size:35px; letter-spacing:-1.5px; }
+.pot-odds-result>div { padding-top:12px; display:flex; align-items:center; justify-content:space-between; gap:15px; border-top:1px solid #302a1c; }
+.pot-odds-result>div span { color:#82775d; font-size:8px; }
+.pot-odds-result>div b { color:#ddd3bb; font-size:11px; }
+.pot-odds-result>small { display:block; margin-top:7px; color:#554e3d; font:8px var(--font-geist-mono),monospace; }
+.pot-odds-result>p { margin:15px 0 0; color:#948a72; font-size:10px; line-height:1.55; }
+.pot-odds-result>p b { color:#d9c899; }
+.ev-comparison { margin-top:13px; padding:17px; border:1px solid #27543f; border-radius:11px; background:#0d1a15; }
+.ev-comparison.negative { border-color:#5c352d; background:#1a110f; }
+.ev-comparison.neutral { border-color:#5b5137; background:#17150f; }
+.ev-comparison>span { color:#5f8b77; font:750 7px var(--font-geist-mono),monospace; letter-spacing:1.1px; }
+.ev-comparison dl { margin:11px 0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.ev-comparison dl>div { padding:9px; border-radius:7px; background:rgba(255,255,255,.025); }
+.ev-comparison dt { color:#60706a; font-size:7px; }
+.ev-comparison dd { margin:4px 0 0; color:#dce6e2; font-size:12px; font-weight:800; }
+.ev-comparison>strong { display:block; color:#4ee098; font-size:16px; }
+.ev-comparison.negative>strong { color:#ed917a; }
+.ev-comparison.neutral>strong { color:#d9bd72; }
+.ev-comparison>p { margin:8px 0; color:#8a9b94; font-size:9px; line-height:1.5; }
+.ev-comparison>small { color:#50605a; font-size:7px; line-height:1.4; }
+.integration-placeholder { margin-top:13px; padding:16px; border:1px dashed #293733; border-radius:10px; }
+.integration-placeholder span { color:#61716b; font:750 7px var(--font-geist-mono),monospace; letter-spacing:1px; }
+.integration-placeholder p { margin:7px 0 0; color:#52615c; font-size:9px; line-height:1.5; }
+.poker-tool-card button:focus-visible,.poker-tool-card input:focus-visible,.poker-tool-card select:focus-visible { outline:2px solid #f0c66c; outline-offset:2px; }
+
+@media (max-width:980px) {
+  .poker-tools-grid { grid-template-columns:1fr; }
+  .pot-odds-card { position:static; }
+  .hand-row { grid-template-columns:92px minmax(0,1fr) auto; }
+}
+
+@media (max-width:650px) {
+  .tools-content { width:calc(100% - 24px); padding:38px 0 60px; }
+  .tools-heading { margin-bottom:25px; }
+  .tools-heading h1 { font-size:39px; }
+  .equity-calculator-card,.pot-odds-card { padding:18px; border-radius:13px; }
+  .hand-row { grid-template-columns:76px minmax(0,1fr); gap:9px; }
+  .swap-hands-button { grid-column:2; width:max-content; }
+  .board-hand-row .hand-row-label { grid-column:1; }
+  .board-hand-row .board-slots { grid-column:2; }
+  .tool-card-slot { width:49px; height:68px; }
+  .tool-card-face b { font-size:16px; }.tool-card-face span { font-size:19px; }
+  .card-picker { padding:13px 10px; }
+  .card-picker-heading>small { display:none; }
+  .card-picker-row { grid-template-columns:17px minmax(0,1fr); gap:5px; }
+  .picker-suit { font-size:15px; }
+  .card-picker-row>div { gap:2px; }
+  .card-picker-row button { height:34px; border-radius:4px; }
+  .card-picker-row button span { font-size:9px; }.card-picker-row button small { font-size:8px; }
+  .equity-controls { grid-template-columns:1fr 1fr; }
+  .equity-controls>label { align-self:end; }
+  .calculate-equity-button { grid-column:1/3; }
+}
+
+@media (max-width:410px) {
+  .tools-content { width:calc(100% - 16px); }
+  .equity-calculator-card,.pot-odds-card { padding:14px; }
+  .tool-card-heading { gap:10px; }.tool-card-heading .tool-icon { width:34px; height:34px; }
+  .hand-row { grid-template-columns:1fr; }
+  .hand-row-label { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .hand-row-label small { margin:0; }
+  .swap-hands-button,.board-hand-row .hand-row-label,.board-hand-row .board-slots { grid-column:1; }
+  .card-slot-row { gap:6px; }
+  .board-slots .tool-card-slot { min-width:0; width:auto; flex:1; }
+  .card-picker { margin-left:-5px; margin-right:-5px; padding-left:7px; padding-right:7px; }
+  .card-picker-row { grid-template-columns:15px minmax(0,1fr); gap:3px; }
+  .card-picker-row>div { gap:1px; }
+  .card-picker-row button { height:33px; padding-left:0; padding-right:0; }
+  .equity-headlines>div { padding:10px 7px; }.equity-headlines strong { font-size:19px; }.equity-headlines .tie-headline strong { font-size:15px; }
+  .equity-cards-summary { grid-template-columns:1fr; }
+}

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AuthUser } from "../db/auth";
 
-export default function MemberHeader({ user, active }: { user: AuthUser | null; active?: "account" | "progress" | "support" }) {
+export default function MemberHeader({ user, active }: { user: AuthUser | null; active?: "account" | "progress" | "support" | "tools" }) {
   const router = useRouter();
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -18,6 +18,7 @@ export default function MemberHeader({ user, active }: { user: AuthUser | null; 
       <nav className="nav-links" aria-label="Navegação principal">
         <Link href="/">Início</Link>
         {user && <Link className={active === "progress" ? "active" : ""} href="/progresso">Progresso</Link>}
+        <Link className={active === "tools" ? "active" : ""} href="/ferramentas">Ferramentas</Link>
         <Link className={active === "support" ? "active" : ""} href="/suporte">Suporte</Link>
         {user?.role === "admin" && <Link href="/admin/studies">Estudos HRC</Link>}
       </nav>

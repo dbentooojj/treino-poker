@@ -219,11 +219,23 @@ export function isTrustedOrigin(request: Request) {
 }
 
 export function sessionCookie(token: string, maxAge: number) {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${shouldUseSecureCookies() ? "; Secure" : ""}`;
 }
 
 export function clearSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${shouldUseSecureCookies() ? "; Secure" : ""}`;
+}
+
+function shouldUseSecureCookies() {
+  const baseUrl = process.env.APP_BASE_URL?.trim();
+  if (baseUrl) {
+    try {
+      return new URL(baseUrl).protocol === "https:";
+    } catch {
+      return process.env.NODE_ENV === "production";
+    }
+  }
+  return process.env.NODE_ENV === "production";
 }
 
 async function hashPassword(password: string, suppliedSalt?: string) {
