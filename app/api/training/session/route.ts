@@ -45,7 +45,7 @@ export async function PATCH(request: Request) {
 
 function isValidConfig(value: Partial<TrainingConfig>): value is TrainingConfig {
   if (!isTrainingType(value.trainingType) || !isEquityModel(value.equityModel) || !isTrainingDifficulty(value.difficulty)) return false;
-  if (![6, 9].includes(value.playersCount ?? 0)) return false;
+  if (!Number.isInteger(value.playersCount) || (value.playersCount ?? 0) < 2 || (value.playersCount ?? 0) > 10) return false;
   if (!Number.isFinite(value.stackDepthBb) || (value.stackDepthBb ?? 0) <= 0) return false;
   if (!isTrainingPosition(value.heroPosition)) return false;
   if (requiresVillainPosition(value.trainingType) && !isTrainingPosition(value.villainPosition)) return false;

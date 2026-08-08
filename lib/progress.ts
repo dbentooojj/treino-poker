@@ -28,6 +28,7 @@ export type ProgressEvolutionPoint = {
 };
 
 export type ProgressDashboardData = {
+  generatedAt: number;
   summary: {
     hands: number;
     accuracy: number;
@@ -70,6 +71,7 @@ export function buildProgressDashboard(records: ProgressSessionRecord[]): Progre
   const correct = sessions.reduce((total, session) => total + session.correctAnswers, 0);
 
   return {
+    generatedAt: Date.now(),
     summary: {
       hands,
       accuracy: calculateAccuracy(correct, hands),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   EQUITY_MODELS,
   TRAINING_DIFFICULTIES,
@@ -111,7 +111,7 @@ export function TrainingSetup({ preferredType, onClose, onStarted }: {
 
       {loading && options.trainingTypes.length === 0 ? <div className="setup-loading"><i/><span>Consultando estudos disponíveis…</span></div> : noStudies ? <EmptyStudies/> : <>
         <div className="setup-row setup-model-row"><div className="setup-group"><label>Modelo</label><div className="choice-grid compact">{EQUITY_MODELS.map((model) => <button type="button" key={model} disabled={!options.equityModels.includes(model)} className={filters.equityModel === model ? "selected" : ""} onClick={() => updateFilter(setFilters, "equityModel", model)}>{equityModelLabels[model]}</button>)}</div></div>
-          <div className="setup-group"><label>Mesa</label><div className="choice-grid compact">{[6, 9].map((count) => <button type="button" key={count} disabled={!options.playerCounts.includes(count)} className={filters.playersCount === count ? "selected" : ""} onClick={() => updateFilter(setFilters, "playersCount", count)}>{count}-max</button>)}</div></div></div>
+          <div className="setup-group"><label>Mesa</label><div className="choice-grid compact">{options.playerCounts.map((count) => <button type="button" key={count} className={filters.playersCount === count ? "selected" : ""} onClick={() => updateFilter(setFilters, "playersCount", count)}>{count}-max</button>)}</div></div></div>
 
         <div className="setup-row"><SelectField label="Stack efetivo" value={filters.stackDepthBb} disabled={!options.stackDepthsBb.length} onChange={(value) => updateFilter(setFilters, "stackDepthBb", Number(value))} options={options.stackDepthsBb.map((stack) => ({ value: stack, label: `${formatBb(stack)} BB` }))}/>
           <SelectField label="Posição do Hero" value={filters.heroPosition} disabled={!options.heroPositions.length} onChange={(value) => updateFilter(setFilters, "heroPosition", value)} options={options.heroPositions.map(asOption)}/></div>
@@ -137,17 +137,29 @@ export function DatabaseTrainer({ session, onExit }: { session: TrainingSession;
   const [index, setIndex] = useState(0);
   const [choice, setChoice] = useState<TrainingAction | null>(null);
   const [stats, setStats] = useState({ answered: 0, correct: 0 });
+  const completedRef = useRef(false);
   const hand = node.hands[index] ?? node.hands[0];
   const cards = handClassCards(hand.handClass);
   const result = choice ? evaluateChoice(choice, node.availableActions, hand.bestAction, hand.evs) : null;
   const accuracy = stats.answered ? Math.round(stats.correct / stats.answered * 100) : 0;
   const history = useMemo(() => node.actionSequence.map(formatSequenceAction), [node.actionSequence]);
 
+  useEffect(() => {
+    function finishOnPageHide() {
+      if (completedRef.current) return;
+      completedRef.current = true;
+      void saveProgress(session, { completed: true }, true);
+    }
+    window.addEventListener("pagehide", finishOnPageHide);
+    return () => window.removeEventListener("pagehide", finishOnPageHide);
+  }, [session]);
+
   function answer(action: TrainingAction) {
     if (choice) return;
     const evaluation = evaluateChoice(action, node.availableActions, hand.bestAction, hand.evs);
     setChoice(action);
     setStats((current) => ({ answered: current.answered + 1, correct: current.correct + (evaluation.correct ? 1 : 0) }));
+    void saveProgress(session, { answerCorrect: evaluation.correct });
   }
 
   function next() {
@@ -155,7 +167,15 @@ export function DatabaseTrainer({ session, onExit }: { session: TrainingSession;
     setIndex((current) => (current + 1) % node.hands.length);
   }
 
-  return <main className="training-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={onExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>{trainingTypeLabels[node.trainingType]}</span><b>{equityModelLabels[node.equityModel]} · {node.playersCount}-max · {formatBb(node.heroStackBb)} BB</b></div><button className="exit-button" onClick={onExit}>← Sair do treino</button></header>
+  async function finishAndExit() {
+    if (!completedRef.current) {
+      completedRef.current = true;
+      await saveProgress(session, { completed: true }, true);
+    }
+    onExit();
+  }
+
+  return <main className="training-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={finishAndExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>{trainingTypeLabels[node.trainingType]}</span><b>{equityModelLabels[node.equityModel]} · {node.playersCount}-max · {formatBb(node.heroStackBb)} BB</b></div><button className="exit-button" onClick={finishAndExit}>← Sair do treino</button></header>
     <div className="hrc-pack-bar"><span><i>✓</i> {node.setName}</span><div><b>{node.hands.length}</b> classes de mão <em>•</em> {difficultyLabels[session.config.difficulty]} <em>•</em> dados persistidos no estudo</div></div>
     <section className="trainer-layout"><div className="practice-column"><div className="table-meta"><span><i/> TORNEIO · PRÉ-FLOP</span><div>{history.map((item, itemIndex) => <small key={`${item}-${itemIndex}`}>{item}</small>)}</div></div>
       <div className="hrc-table-shell"><div className="hrc-table"><div className="trainer-inner-line"/>{node.villainPosition && <div className="game-seat hrc-villain"><span>{node.villainPosition}</span><b>{formatBb(node.heroStackBb)} BB efetivos</b><small>{history.at(-1)?.toUpperCase() || "AGUARDA"}</small></div>}<div className="center-pot"><span>BLINDS</span><b>{formatBlinds(node.blinds)}</b></div><div className="trainer-hero-cards"><TrainingCard rank={cards[0]} suit={cards[1]}/><TrainingCard rank={cards[2]} suit={cards[3]}/></div><div className="game-seat game-hero"><span>VOCÊ · {node.heroPosition}</span><b>{formatBb(node.heroStackBb)} BB</b><small>SUA AÇÃO</small></div><span className="hrc-player-note">{node.playersCount} jogadores no cálculo</span></div></div>
@@ -165,6 +185,23 @@ export function DatabaseTrainer({ session, onExit }: { session: TrainingSession;
       </div></div>
       <aside className="stats-rail"><div className="session-card"><div className="rail-title"><span>SESSÃO ATUAL</span><i>● ao vivo</i></div><div className="accuracy-ring" style={{ "--accuracy": `${accuracy * 3.6}deg` } as React.CSSProperties}><div><b>{accuracy}%</b><span>acerto</span></div></div><div className="stat-row"><div><span>Respostas</span><b>{stats.answered}</b></div><div><span>Acertos</span><b className="green-text">{stats.correct}</b></div><div><span>Erros</span><b className="red-text">{stats.answered - stats.correct}</b></div></div></div><div className="concept-card"><span>CONFIGURAÇÃO</span><div><i>{trainingTypeLabels[node.trainingType]}</i><i>{equityModelLabels[node.equityModel]}</i><i>{node.playersCount}-max</i><i>{formatBb(node.heroStackBb)} BB</i></div></div></aside>
     </section></main>;
+}
+
+async function saveProgress(session: TrainingSession, update: { answerCorrect?: boolean; completed?: boolean }, keepalive = false) {
+  try {
+    await fetch("/api/training/session", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: session.progressSessionId,
+        durationSeconds: Math.max(0, Math.round((Date.now() - session.startedAt) / 1000)),
+        ...update,
+      }),
+      keepalive,
+    });
+  } catch {
+    // A interface de treino não deve ser interrompida por uma falha transitória de telemetria.
+  }
 }
 
 function normalizeFilters(current: TrainingFilters, options: TrainingOptions): TrainingFilters {

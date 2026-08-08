@@ -13,6 +13,7 @@ export type TrainingAction = {
   type: TrainingActionType;
   amountBb?: number;
   label?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type TrainingSequenceAction = TrainingAction & {
@@ -149,5 +150,7 @@ export function isTrainingDifficulty(value: unknown): value is TrainingDifficult
 }
 
 export function isTrainingPosition(value: unknown): value is string {
-  return typeof value === "string" && (TRAINING_POSITIONS as readonly string[]).includes(value);
+  return typeof value === "string"
+    && value.length <= 12
+    && /^(?:UTG(?:\+[1-7])?|EP|MP[1-7]?|HJ|CO|BTN|BU|SB|BB|P(?:[1-9]|10))$/.test(value);
 }

@@ -2,20 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import {
-  parseHrcPack,
-  positionNames,
-  type HrcAction,
-  type HrcHand,
-  type HrcNode,
-  type HrcPack,
-} from "../lib/hrc-import";
 import { TRAINING_TYPES, trainingTypeLabels, type TrainingSession, type TrainingType } from "../lib/training";
 import { DatabaseTrainer, TrainingSetup } from "./training-experience";
 
 type ActionName = "Fold" | "Check" | "Call" | "Bet" | "Raise" | "All-in";
 type StatState = { answered: number; correct: number; errors: number; topics: Record<string, number> };
-type HrcCandidate = { node:HrcNode; handClass:string; hand:HrcHand };
 type CurrentUser = { id:string; name:string; email:string; role:"admin"|"user" };
 
 const modes = ["Pre-flop", "Pós-flop", "Cash Game", "Torneio", "Short Stack", "Heads-Up", "Aleatório"];
@@ -127,101 +118,8 @@ function Trainer({ mode, onExit }: { mode:string; onExit:()=>void }) {
 void Setup;
 void Trainer;
 
-function handCards(handClass:string):[string,string,string,string] {
-  const pair=handClass.length===2;
-  if(pair) return [handClass[0],"♠",handClass[1],"♥"];
-  const suited=handClass.endsWith("s");
-  return [handClass[0],"♠",handClass[1],suited?"♠":"♥"];
-}
-
-function hrcActionLabel(action:HrcAction,node:HrcNode,pack:HrcPack) {
-  const bb=pack.settings.handdata.blinds[0], total=pack.settings.handdata.stacks[node.player];
-  if(action.type==="F") return "Fold";
-  if(action.type==="C") return "Call";
-  const amount=action.amount/bb;
-  return action.amount>=total ? `All-in ${Number(amount.toFixed(1))} BB` : `Raise ${Number(amount.toFixed(1))} BB`;
-}
-
-function hrcStateAtNode(node:HrcNode,pack:HrcPack) {
-  const bb=pack.settings.handdata.blinds[0], count=pack.settings.handdata.stacks.length, positions=positionNames(count);
-  const committed=Array(count).fill(0), ante=(pack.settings.handdata.blinds[2]||0)/bb;
-  if(count>=2){committed[count-2]=pack.settings.handdata.blinds[1]/bb;committed[count-1]=1;}
-  let pot=committed.reduce((a,b)=>a+b,0)+(ante*count);
-  const history:string[]=[];
-  for(const action of node.sequence){
-    const pos=positions[action.player]??`P${action.player+1}`;
-    if(action.type==="R"){
-      const to=action.amount/bb, delta=Math.max(0,to-committed[action.player]); pot+=delta; committed[action.player]=to;
-      history.push(`${pos} raise ${Number(to.toFixed(1))} BB`);
-    } else if(action.type==="C"){
-      const add=action.amount/bb; pot+=add; committed[action.player]+=add; history.push(`${pos} call ${Number(add.toFixed(1))} BB`);
-    } else history.push(`${pos} fold`);
-  }
-  const stackTotal=pack.settings.handdata.stacks[node.player]/bb;
-  return {positions,heroPos:positions[node.player]??`P${node.player+1}`,pot,heroStack:stackTotal-committed[node.player],history,stackTotal};
-}
-
-function HrcTable({candidate,pack}:{candidate:HrcCandidate;pack:HrcPack}) {
-  const state=hrcStateAtNode(candidate.node,pack), cards=handCards(candidate.handClass), count=pack.settings.handdata.stacks.length;
-  const villain=candidate.node.player===0?1:0, villainPos=state.positions[villain]??"Vilão";
-  const villainStack=(pack.settings.handdata.stacks[villain]/pack.settings.handdata.blinds[0]).toFixed(1).replace(".0","");
-  return <div className="hrc-table-shell"><div className="hrc-table"><div className="trainer-inner-line"/>
-    <div className="game-seat hrc-villain"><span>{villainPos}</span><b>{villainStack} BB</b><small>{state.history.at(-1)?.toUpperCase()||"AGUARDA"}</small></div>
-    <div className="center-pot"><span>POTE</span><b>{Number(state.pot.toFixed(1))} BB</b></div>
-    <div className="trainer-hero-cards"><Card rank={cards[0]} suit={cards[1]}/><Card rank={cards[2]} suit={cards[3]}/></div>
-    <div className="game-seat game-hero"><span>VOCÊ · {state.heroPos}</span><b>{Number(state.heroStack.toFixed(1))} BB</b><small>SUA AÇÃO</small></div>
-    {count>2&&<span className="hrc-player-note">{count} jogadores no cálculo</span>}
-  </div></div>;
-}
-
-function HrcTrainer({pack,onExit}:{pack:HrcPack;onExit:()=>void}) {
-  const candidates=useMemo(()=>pack.nodes.flatMap(node=>Object.entries(node.hands).filter(([,hand])=>hand.weight>=.01).map(([handClass,hand])=>({node,handClass,hand}))),[pack]);
-  const initialIndex=Math.max(0,candidates.findIndex(c=>pack.nodes.indexOf(c.node)===1&&c.handClass==="A5s"));
-  const [index,setIndex]=useState(initialIndex), [choice,setChoice]=useState<number|null>(null), [stats,setStats]=useState({answered:0,correct:0});
-  const candidate=candidates[index]??candidates[0], node=candidate.node, hand=candidate.hand, state=hrcStateAtNode(node,pack), bb=pack.settings.handdata.blinds[0];
-  const maxEv=Math.max(...hand.evs), chosenEv=choice===null?null:hand.evs[choice], evLoss=chosenEv===null?0:maxEv-chosenEv, good=choice!==null&&evLoss<=.05;
-  const mixed=hand.played.filter(v=>v>=.05).length>1;
-  const positions=positionNames(pack.settings.handdata.stacks.length);
-  const sourceLabel=pack.settings.eqmodel.id.toLowerCase().includes("icm")?"ICM":"ChipEV";
-  function answer(i:number){ if(choice!==null)return; const ok=maxEv-hand.evs[i]<=.05; setChoice(i); setStats(s=>({answered:s.answered+1,correct:s.correct+(ok?1:0)})); }
-  function next(){
-    setChoice(null);
-    if(candidates.length<=1)return;
-    let nextIndex=Math.floor(Math.random()*candidates.length); if(nextIndex===index)nextIndex=(nextIndex+1)%candidates.length; setIndex(nextIndex);
-  }
-  const prompt=state.history.length?`${state.history.join(" → ")}. Sua ação com ${candidate.handClass}?`:`Você está no ${state.heroPos} com ${candidate.handClass}. Qual é sua ação?`;
-  return <main className="training-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={onExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>HRC SOLVER</span><b>{sourceLabel} · {state.stackTotal} BB · {pack.settings.handdata.stacks.length===2?'Heads-Up':`${pack.settings.handdata.stacks.length}-max`}</b></div><button className="exit-button" onClick={onExit}>← Sair do treino</button></header>
-    <div className="hrc-pack-bar"><span><i>✓</i> {pack.name} importado</span><div><b>{pack.nodes.length}</b> nós de decisão <em>•</em> <b>{pack.eligible}</b> spots elegíveis <em>•</em> estudo salvo no banco</div></div>
-    <section className="trainer-layout"><div className="practice-column"><div className="table-meta"><span><i/> SPOT HRC · PRÉ-FLOP</span><div>{state.history.map((h,i)=><small key={i}>{h}</small>)}</div></div><HrcTable candidate={candidate} pack={pack}/>
-      <div className="decision-panel"><div className="decision-copy"><span>SUA DECISÃO · {state.heroPos}</span><h1>{prompt}</h1><p>Escolha antes de ver a estratégia e o EV do solver.</p></div>
-        {choice===null&&<div className={`hrc-action-grid actions-${node.actions.length}`}>{node.actions.map((action,i)=>{const label=hrcActionLabel(action,node,pack);return <button key={`${action.type}-${action.amount}`} onClick={()=>answer(i)}><span>{action.type==="F"?'×':action.type==="C"?'●':action.amount>=pack.settings.handdata.stacks[node.player]?'⚡':'▲'}</span><b>{label}</b><small>{action.type==="R"&&action.amount<pack.settings.handdata.stacks[node.player]?`${Number((action.amount/bb).toFixed(1))} BB`:""}</small></button>})}</div>}
-        {choice!==null&&<div className={`feedback ${good?'feedback-good':'feedback-bad'}`}><div className="verdict-icon">{good?'✓':'!'}</div><div className="feedback-main"><span>{good?'BOA DECISÃO':'DECISÃO INFERIOR AO SOLVER'}</span><h2>{good?(mixed?'Linha válida dentro do mix do HRC.':'Você escolheu uma linha de EV alto.'):`EV perdido: ${evLoss.toFixed(2)} BB`}</h2><p>Agora a resposta foi revelada. As frequências e EVs abaixo vieram diretamente do arquivo exportado pelo HRC.</p>
-          <div className="solver-result-list">{node.actions.map((action,i)=>{const freq=hand.played[i]*100, best=Math.abs(hand.evs[i]-maxEv)<.0001;return <div key={i} className={`${choice===i?'chosen':''} ${best?'best':''}`}><span>{hrcActionLabel(action,node,pack)}</span><div className="frequency-track"><i style={{width:`${Math.max(freq,1)}%`}}/></div><b>{freq.toFixed(1)}%</b><small>EV {hand.evs[i]>=0?'+':''}{hand.evs[i].toFixed(2)} BB</small></div>})}</div>
-          <div className="feedback-bottom"><small>HRC · estratégia para <b>{candidate.handClass}</b> · peso no node {(hand.weight*100).toFixed(1)}%</small><button onClick={next}>Próximo spot HRC →</button></div></div></div>}
-      </div></div>
-      <aside className="stats-rail"><div className="session-card"><div className="rail-title"><span>TREINO HRC</span><i>● solver</i></div><div className="accuracy-ring" style={{'--accuracy':`${(stats.answered?stats.correct/stats.answered*360:0)}deg`} as React.CSSProperties}><div><b>{stats.answered?Math.round(stats.correct/stats.answered*100):0}%</b><span>acerto</span></div></div><div className="stat-row"><div><span>Spots</span><b>{stats.answered}</b></div><div><span>Acertos</span><b className="green-text">{stats.correct}</b></div><div><span>Erros</span><b className="red-text">{stats.answered-stats.correct}</b></div></div></div>
-        <div className="leak-card"><div className="rail-title"><span>FONTE DA RESPOSTA</span></div><p>Frequências e EV são lidos do <b>Complete Export</b> do HRC. O RangeLab não inventa a ação correta.</p></div><div className="concept-card"><span>SPOT ATUAL</span><div><i>{positions[node.player]}</i><i>{candidate.handClass}</i><i>{sourceLabel}</i><i>{node.actions.length} ações</i></div></div></aside>
-    </section>
-  </main>;
-}
-
-function HrcImportButton({onImport,onError,className="import-button"}:{onImport:(pack:HrcPack)=>void;onError:(message:string)=>void;className?:string}) {
-  const [loading,setLoading]=useState(false);
-  async function handleFile(e:React.ChangeEvent<HTMLInputElement>){
-    const file=e.target.files?.[0]; if(!file)return; setLoading(true); onError("");
-    try{
-      const pack=await parseHrcPack(file);
-      const response=await fetch("/api/studies/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(pack)});
-      const result=await response.json() as {error?:string};
-      if(!response.ok)throw new Error(result.error||"Não foi possível salvar o estudo.");
-      onImport(pack);
-    }catch(error){onError(error instanceof Error?error.message:"Não foi possível importar o estudo do HRC.");}finally{setLoading(false);e.target.value="";}
-  }
-  return <label className={className}><span>{loading?'…':'⇧'}</span>{loading?'Salvando estudo…':'Importar HRC (.zip)'}<input type="file" accept=".zip,application/zip" disabled={loading} onChange={handleFile}/></label>;
-}
-
 export default function Home() {
-  const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [hrcPack,setHrcPack]=useState<HrcPack|null>(null), [hrcError,setHrcError]=useState(""), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
+  const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
   useEffect(()=>{
     let active=true;
     fetch("/api/auth/me",{cache:"no-store"})
@@ -234,10 +132,9 @@ export default function Home() {
   function openTrainingSetup(){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(undefined);setSetupOpen(true);}
   function openTrainingType(trainingType:TrainingType){if(!authReady)return;if(!currentUser){window.location.assign("/login");return;}setPreferredType(trainingType);setSetupOpen(true);}
   async function logout(){await fetch("/api/auth/logout",{method:"POST"});window.location.assign("/");}
-  if(hrcPack&&isAdmin)return <HrcTrainer pack={hrcPack} onExit={()=>setHrcPack(null)}/>;
   if(trainingSession)return <DatabaseTrainer session={trainingSession} onExit={()=>setTrainingSession(null)}/>;
-  return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal"><a href="#progresso">Progresso</a><Link href="/suporte">Suporte</Link>{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError} className="ghost-import"/>}{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
-    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> EVOLUA SUAS DECISÕES · TEXAS HOLD’EM</div><h1>Pare de adivinhar.<br/><em>Jogue com vantagem.</em></h1><p>Transforme cada spot em uma decisão mais confiante. Treine mãos completas, receba feedback objetivo e leve uma estratégia mais sólida para suas mesas.</p><div className="hero-actions"><button className="primary-button" onClick={openTrainingSetup} disabled={!authReady}><span>▶</span> {currentUser?"Começar treinamento":"Começar agora"}</button>{isAdmin&&<HrcImportButton onImport={setHrcPack} onError={setHrcError}/>}</div>{isAdmin&&hrcError&&<div className="import-error">{hrcError}</div>}{isAdmin&&<div className="hrc-local-note"><span>HRC</span> Complete Export processado localmente e salvo no banco de dados</div>}<div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
+  return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal">{currentUser&&<Link href="/progresso">Progresso</Link>}<Link href="/suporte">Suporte</Link>{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
+    <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> EVOLUA SUAS DECISÕES · TEXAS HOLD’EM</div><h1>Pare de adivinhar.<br/><em>Jogue com vantagem.</em></h1><p>Transforme cada spot em uma decisão mais confiante. Treine mãos completas, receba feedback objetivo e leve uma estratégia mais sólida para suas mesas.</p><div className="hero-actions"><button className="primary-button" onClick={openTrainingSetup} disabled={!authReady}><span>▶</span> {currentUser?"Começar treinamento":"Começar agora"}</button></div><div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
     <section className="mode-strip" id="modos"><p>TREINOS DE TORNEIO · PRÉ-FLOP</p><div className="mode-list training-mode-list">{TRAINING_TYPES.map((type)=><button key={type} onClick={()=>openTrainingType(type)}><span>{type==='PUSH_FOLD'?'⚡':type==='CALL_VS_SHOVE'?'●':type==='OPEN_FOLD'?'▲':'♠'}</span>{trainingTypeLabels[type]}</button>)}</div></section>
     <section className="promise-grid" id="treinar"><article><span>01</span><h2>Spots reais do estudo.</h2><p>Stacks, posições e ações vêm dos nodes persistidos do HRC.</p></article><article><span>02</span><h2>Frequências e EVs.</h2><p>Compare sua decisão com a estratégia armazenada para cada classe de mão.</p></article><article id="progresso"><span>03</span><h2>Configuração sem atalhos.</h2><p>O treino só começa quando existe uma combinação compatível no banco.</p></article></section>
     {setupOpen&&<TrainingSetup preferredType={preferredType} onClose={()=>setSetupOpen(false)} onStarted={(session)=>{setSetupOpen(false);setTrainingSession(session);}}/>}

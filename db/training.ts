@@ -22,6 +22,7 @@ export function ensureTrainingSchema() {
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
         source TEXT NOT NULL DEFAULT 'HRC',
+        content_hash TEXT,
         game_type TEXT NOT NULL DEFAULT 'TOURNAMENT' CHECK (game_type IN ('TOURNAMENT')),
         street TEXT NOT NULL DEFAULT 'PREFLOP' CHECK (street IN ('PREFLOP')),
         equity_model TEXT NOT NULL CHECK (equity_model IN ('CHIP_EV', 'ICM')),
@@ -36,6 +37,7 @@ export function ensureTrainingSchema() {
         imported_at INTEGER NOT NULL,
         metadata TEXT
       )`),
+      env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS training_sets_content_hash_unique ON training_sets (content_hash)"),
       env.DB.prepare("CREATE INDEX IF NOT EXISTS training_sets_lookup_idx ON training_sets (game_type, street, equity_model, players_count)"),
       env.DB.prepare("CREATE INDEX IF NOT EXISTS training_sets_status_idx ON training_sets (status)"),
       env.DB.prepare(`CREATE TABLE IF NOT EXISTS training_nodes (
@@ -121,6 +123,7 @@ export async function getTrainingSession(config: TrainingConfig): Promise<Traini
     INNER JOIN training_nodes n ON n.id = c.id
     INNER JOIN training_sets s ON s.id = n.training_set_id
     INNER JOIN training_hands h ON h.training_node_id = n.id
+      AND COALESCE(CAST(json_extract(h.metadata, '$.hrcWeight') AS REAL), 1) >= 0.01
     ORDER BY h.hand_class`, exact.params);
   if (!rows.length) return [];
   const first = rows[0];
@@ -153,7 +156,7 @@ export async function getTrainingSession(config: TrainingConfig): Promise<Traini
 type ClauseResult = { parts: string[]; params: Array<string | number> };
 
 function clauses(filters: TrainingFilters, keys: Array<keyof TrainingFilters>): ClauseResult {
-  const result: ClauseResult = { parts: ["s.game_type = 'TOURNAMENT'", "s.street = 'PREFLOP'", "s.status = 'ACTIVE'", "s.players_count IN (6, 9)"], params: [] };
+  const result: ClauseResult = { parts: ["s.game_type = 'TOURNAMENT'", "s.street = 'PREFLOP'", "s.status = 'ACTIVE'"], params: [] };
   const mapping: Partial<Record<keyof TrainingFilters, string>> = {
     trainingType: "n.training_type",
     equityModel: "s.equity_model",
@@ -212,7 +215,7 @@ function parseNumberRecord(value: string): Record<string, number> {
   }
 }
 
-const POSITION_ORDER = ["UTG", "EP", "MP1", "MP2", "HJ", "CO", "BTN", "BU", "SB", "BB"];
+const POSITION_ORDER = ["UTG", "UTG+1", "UTG+2", "UTG+3", "EP", "MP", "MP1", "MP2", "HJ", "CO", "BTN", "BU", "SB", "BB"];
 
 function sortPositions(positions: string[]) {
   return positions.sort((left, right) => {

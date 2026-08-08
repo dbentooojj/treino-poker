@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { AuthUser } from "../../../db/auth";
 import type { AdminStudy, StudiesAdminData } from "../../../db/studies";
-import { parseHrcPack } from "../../../lib/hrc-import";
+import type { HrcImportSummary } from "../../../lib/hrc-import";
 
 const modelLabels: Record<AdminStudy["equityModel"], string> = {
   CHIP_EV: "ChipEV",
@@ -30,7 +30,7 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
   const [adminData, setAdminData] = useState(data);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
-  const [importNotice, setImportNotice] = useState("");
+  const [importReport, setImportReport] = useState<HrcImportSummary | null>(null);
 
   useEffect(() => {
     if (!importOpen) return;
@@ -46,18 +46,18 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
     if (!file || importing) return;
     setImporting(true);
     setImportError("");
-    setImportNotice("");
+    setImportReport(null);
     try {
-      const pack = await parseHrcPack(file);
+      const formData = new FormData();
+      formData.set("file", file);
       const response = await fetch("/api/studies/import", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pack),
+        body: formData,
       });
-      const result = await response.json() as { data?: StudiesAdminData; error?: string };
-      if (!response.ok || !result.data) throw new Error(result.error || "Não foi possível salvar o estudo.");
+      const result = await response.json() as { data?: StudiesAdminData; summary?: HrcImportSummary; error?: string };
+      if (!response.ok || !result.data || !result.summary) throw new Error(result.error || "Não foi possível salvar o estudo.");
       setAdminData(result.data);
-      setImportNotice(`${pack.name} foi salvo no banco de dados e já está disponível para treino.`);
+      setImportReport(result.summary);
       setImportOpen(false);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "Não foi possível importar o estudo.");
@@ -87,7 +87,11 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
         <button className="admin-import-button" onClick={() => { setImportError(""); setImportOpen(true); }}><span>＋</span> Importar estudo</button>
       </div>
 
-      {importNotice && <div className="admin-import-notice" role="status"><span>✓</span>{importNotice}<button onClick={() => setImportNotice("")} aria-label="Fechar aviso">×</button></div>}
+      {importReport && <div className="admin-import-notice" role="status"><span>✓</span><div>
+        <b>Importação concluída — {importReport.name}</b>
+        <small>{modelLabels[importReport.equityModel]} · {importReport.playersCount}-max · {importReport.stackBb === null ? "stacks variados" : `${formatNumber(importReport.stackBb)} BB`} · {formatAnte(importReport)}</small>
+        <small>{importReport.counts.PUSH_FOLD} Push/Fold · {importReport.counts.CALL_VS_SHOVE} Call vs Shove · {importReport.counts.OPEN_FOLD} Open/Fold · {importReport.counts.VS_OPEN} Vs Open</small>
+      </div><button onClick={() => setImportReport(null)} aria-label="Fechar aviso">×</button></div>}
 
       <div className="admin-summary" aria-label="Resumo dos estudos">
         <article><span>ESTUDOS</span><strong>{adminData.summary.studies}</strong><small>Total cadastrado</small></article>
@@ -134,4 +138,9 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
       </section>
     </div>}
   </main>;
+}
+
+function formatAnte(report: HrcImportSummary) {
+  if (report.anteType === "NONE") return "sem ante";
+  return `${anteLabels[report.anteType]} ${formatNumber(report.anteBb)} BB`;
 }

@@ -39,6 +39,7 @@ export const trainingSets = sqliteTable("training_sets", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   source: text("source").notNull().default("HRC"),
+  contentHash: text("content_hash"),
   gameType: text("game_type", { enum: ["TOURNAMENT"] }).notNull().default("TOURNAMENT"),
   street: text("street", { enum: ["PREFLOP"] }).notNull().default("PREFLOP"),
   equityModel: text("equity_model", { enum: ["CHIP_EV", "ICM"] }).notNull(),
@@ -53,6 +54,7 @@ export const trainingSets = sqliteTable("training_sets", {
   importedAt: integer("imported_at").notNull(),
   metadata: text("metadata", { mode: "json" }).$type<Record<string, unknown>>(),
 }, (table) => [
+  uniqueIndex("training_sets_content_hash_unique").on(table.contentHash),
   index("training_sets_lookup_idx").on(table.gameType, table.street, table.equityModel, table.playersCount),
   index("training_sets_status_idx").on(table.status),
 ]);

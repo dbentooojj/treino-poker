@@ -28,7 +28,7 @@ function parseFilters(params: URLSearchParams): TrainingFilters | null {
   if (equityModel && !isEquityModel(equityModel)) return null;
   const playersCount = playersRaw ? Number(playersRaw) : undefined;
   const stackDepthBb = stackRaw ? Number(stackRaw) : undefined;
-  if (playersCount !== undefined && ![6, 9].includes(playersCount)) return null;
+  if (playersCount !== undefined && (!Number.isInteger(playersCount) || playersCount < 2 || playersCount > 10)) return null;
   if (stackDepthBb !== undefined && (!Number.isFinite(stackDepthBb) || stackDepthBb <= 0)) return null;
   if (heroPosition && !isTrainingPosition(heroPosition)) return null;
   if (villainPosition && !isTrainingPosition(villainPosition)) return null;
