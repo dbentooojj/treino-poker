@@ -10,12 +10,13 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run test:unit && npm run typecheck && npm run lint && npm run build",
-    "test:unit": "tsx --test tests/hrc-import.test.ts tests/training.test.ts tests/poker-tools.test.ts",
+    "test:unit": "tsx --test tests/hrc-import.test.ts tests/training.test.ts tests/training-ui.test.tsx tests/poker-tools.test.ts tests/progress.test.ts tests/server-config.test.ts",
     "test:integration": "tsx --test tests/postgres.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.ts",
+    "admin:create": "tsx scripts/create-admin.ts"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

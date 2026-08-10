@@ -19,6 +19,7 @@ export const userRole = pgEnum("user_role", ["admin", "user"]);
 export const gameType = pgEnum("game_type", ["TOURNAMENT"]);
 export const street = pgEnum("street", ["PREFLOP"]);
 export const equityModel = pgEnum("equity_model", ["CHIP_EV", "ICM"]);
+export const evUnit = pgEnum("ev_unit", ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"]);
 export const anteType = pgEnum("ante_type", ["NONE", "ANTE", "BB_ANTE"]);
 export const trainingType = pgEnum("training_type", ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN"]);
 export const trainingSetStatus = pgEnum("training_set_status", ["IMPORTED", "PUBLISHED", "ARCHIVED"]);
@@ -50,7 +51,7 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   usedAt: timestamp("used_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [index("password_reset_user_id_idx").on(table.userId), index("password_reset_expires_at_idx").on(table.expiresAt)]);
+}, (table) => [uniqueIndex("password_reset_user_id_unique").on(table.userId), index("password_reset_expires_at_idx").on(table.expiresAt)]);
 
 export const authRateLimits = pgTable("auth_rate_limits", {
   id: text("id").primaryKey(),
@@ -70,6 +71,7 @@ export const trainingSets = pgTable("training_sets", {
   street: street("street").notNull().default("PREFLOP"),
   trainingType: trainingType("training_type"),
   equityModel: equityModel("equity_model").notNull(),
+  evUnit: evUnit("ev_unit").notNull().default("UNKNOWN"),
   playersCount: integer("players_count").notNull(),
   stackBb: doublePrecision("stack_bb"),
   smallBlind: doublePrecision("small_blind").notNull(),
@@ -144,14 +146,19 @@ export const trainingSessions = pgTable("training_sessions", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   completionReason: trainingCompletionReason("completion_reason"),
+  answerDetailsAvailable: boolean("answer_details_available").notNull().default(true),
 }, (table) => [
   foreignKey({ columns: [table.sourceSessionId], foreignColumns: [table.id], name: "training_sessions_source_session_id_fk" }).onDelete("set null"),
   index("training_sessions_user_started_idx").on(table.userId, table.startedAt),
+  uniqueIndex("training_sessions_one_active_per_user_unique").on(table.userId).where(sql`${table.endedAt} IS NULL`),
   index("training_sessions_user_type_idx").on(table.userId, table.trainingType),
   index("training_sessions_set_id_idx").on(table.trainingSetId),
   index("training_sessions_source_id_idx").on(table.sourceSessionId),
-  check("training_sessions_target_questions_check", sql`${table.targetQuestions} IS NULL OR ${table.targetQuestions} > 0`),
+  check("training_sessions_target_questions_check", sql`${table.targetQuestions} IS NULL OR (${table.targetQuestions} > 0 AND ${table.targetQuestions} <= 100)`),
   check("training_sessions_counters_check", sql`${table.answeredQuestions} >= 0 AND ${table.correctAnswers} >= 0 AND ${table.correctAnswers} <= ${table.answeredQuestions}`),
+  check("training_sessions_queue_check", sql`jsonb_typeof(${table.exerciseQueue}) = 'array' AND jsonb_array_length(${table.exerciseQueue}) <= 100 AND ${table.queuePosition} >= 0 AND ((${table.endedAt} IS NULL AND jsonb_array_length(${table.exerciseQueue}) > 0 AND ${table.queuePosition} < jsonb_array_length(${table.exerciseQueue}) AND jsonb_typeof(${table.exerciseQueue} -> ${table.queuePosition}) = 'object' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingSetId') IS NOT DISTINCT FROM 'string' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingNodeId') IS NOT DISTINCT FROM 'string' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingHandId') IS NOT DISTINCT FROM 'string') OR (${table.endedAt} IS NOT NULL AND ${table.queuePosition} <= jsonb_array_length(${table.exerciseQueue})))`),
+  check("training_sessions_completion_consistency_check", sql`(((${table.endedAt} IS NULL AND ${table.completionReason} IS NULL) OR (${table.endedAt} IS NOT NULL AND ${table.completionReason} IS NOT NULL)) AND (${table.completionReason} IS DISTINCT FROM 'COMPLETED' OR (${table.targetQuestions} IS NOT NULL AND ${table.answeredQuestions} >= ${table.targetQuestions})))`),
+  check("training_sessions_summary_only_check", sql`${table.answerDetailsAvailable} = true OR (${table.endedAt} IS NOT NULL AND ${table.completionReason} = 'USER_FINISHED' AND ${table.targetQuestions} IS NULL AND ${table.exerciseQueue} = '[]'::jsonb AND ${table.queuePosition} = 0)`),
 ]);
 
 export const trainingAnswers = pgTable("training_answers", {
@@ -164,6 +171,7 @@ export const trainingAnswers = pgTable("training_answers", {
   handClass: text("hand_class").notNull(),
   heroPosition: text("hero_position").notNull(),
   stackBb: doublePrecision("stack_bb").notNull(),
+  evUnit: evUnit("ev_unit").notNull().default("UNKNOWN"),
   selectedAction: jsonb("selected_action").$type<Record<string, unknown>>().notNull(),
   bestAction: text("best_action").notNull(),
   isCorrect: boolean("is_correct").notNull(),
@@ -178,4 +186,5 @@ export const trainingAnswers = pgTable("training_answers", {
   index("training_answers_node_id_idx").on(table.trainingNodeId),
   index("training_answers_hand_id_idx").on(table.trainingHandId),
   index("training_answers_is_correct_idx").on(table.isCorrect),
+  check("training_answers_question_index_check", sql`${table.questionIndex} >= 0`),
 ]);

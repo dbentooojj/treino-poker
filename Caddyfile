@@ -1,4 +1,9 @@
-{$SITE_ADDRESS::80} {
+{$SITE_ADDRESS} {
   encode zstd gzip
-  reverse_proxy app:3000
+  request_body {
+    max_size 26MB
+  }
+  reverse_proxy app:3000 {
+    header_up -CF-Connecting-IP
+  }
 }

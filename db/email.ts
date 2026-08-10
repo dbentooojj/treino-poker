@@ -1,6 +1,8 @@
+import { publicAppOrigin } from "../lib/server-config";
+
 export async function sendPasswordResetEmail(to: string, resetUrl: string) {
   const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.AUTH_EMAIL_FROM;
+  const from = process.env.EMAIL_FROM;
   if (!apiKey || !from) {
     if (process.env.NODE_ENV === "production") throw new Error("Serviço de e-mail não configurado.");
     return { sent: false };
@@ -14,6 +16,7 @@ export async function sendPasswordResetEmail(to: string, resetUrl: string) {
       "User-Agent": "RangeLab/1.0",
       "Idempotency-Key": crypto.randomUUID(),
     },
+    signal: AbortSignal.timeout(10_000),
     body: JSON.stringify({
       from,
       to: [to],
@@ -27,10 +30,7 @@ export async function sendPasswordResetEmail(to: string, resetUrl: string) {
 }
 
 export function passwordResetBaseUrl(request: Request) {
-  const configured = process.env.APP_BASE_URL?.trim();
-  if (configured) return new URL(configured).origin;
-  if (process.env.NODE_ENV === "production") throw new Error("APP_BASE_URL não configurada.");
-  return new URL(request.url).origin;
+  return publicAppOrigin(process.env, request.url);
 }
 
 function escapeHtml(value: string) {

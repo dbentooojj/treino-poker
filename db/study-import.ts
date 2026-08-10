@@ -9,6 +9,7 @@ export type PersistedHrcStudy = {
   name: string;
   displayName: string | null;
   equityModel: "CHIP_EV" | "ICM";
+  evUnit: HrcStudyImport["evUnit"];
   playersCount: number;
   stackBb: number | null;
   bigBlind: number;
@@ -46,17 +47,6 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     availableActions: node.availableActions,
     metadata: node.metadata,
   }));
-  const handRows = study.nodes.flatMap((node, nodeIndex) => node.hands.map((hand) => ({
-    id: crypto.randomUUID(),
-    trainingNodeId: nodeRows[nodeIndex].id,
-    handClass: hand.handClass,
-    strategy: hand.strategy,
-    evs: hand.evs,
-    bestAction: hand.bestAction,
-    decisionClarity: hand.decisionClarity,
-    isMixed: hand.isMixed,
-    metadata: hand.metadata,
-  })));
   const nodeTypes = [...new Set(study.nodes.map((node) => node.trainingType))];
 
   try {
@@ -70,6 +60,7 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
         street: "PREFLOP",
         trainingType: nodeTypes.length === 1 ? nodeTypes[0] : null,
         equityModel: study.equityModel,
+        evUnit: study.evUnit,
         playersCount: study.playersCount,
         stackBb: study.stackBb,
         smallBlind: study.smallBlind,
@@ -83,7 +74,20 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
         metadata: { ...study.metadata, importedBy, contentHash: study.contentHash, archiveSizeBytes: study.archiveSizeBytes },
       });
       for (const chunk of chunks(nodeRows, 500)) await tx.insert(trainingNodes).values(chunk);
-      for (const chunk of chunks(handRows, 1_000)) await tx.insert(trainingHands).values(chunk);
+      for (let nodeIndex = 0; nodeIndex < study.nodes.length; nodeIndex += 1) {
+        const handRows = study.nodes[nodeIndex].hands.map((hand) => ({
+          id: crypto.randomUUID(),
+          trainingNodeId: nodeRows[nodeIndex].id,
+          handClass: hand.handClass,
+          strategy: hand.strategy,
+          evs: hand.evs,
+          bestAction: hand.bestAction,
+          decisionClarity: hand.decisionClarity,
+          isMixed: hand.isMixed,
+          metadata: hand.metadata,
+        }));
+        for (const chunk of chunks(handRows, 1_000)) await tx.insert(trainingHands).values(chunk);
+      }
     });
   } catch (error) {
     if (hasPostgresErrorCode(error, "23505")) {
@@ -98,6 +102,7 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     name: study.name,
     displayName: null,
     equityModel: study.equityModel,
+    evUnit: study.evUnit,
     playersCount: study.playersCount,
     stackBb: study.stackBb,
     bigBlind: study.bigBlind,

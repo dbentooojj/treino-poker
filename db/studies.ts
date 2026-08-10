@@ -6,6 +6,8 @@ import { persistHrcStudy } from "./study-import";
 
 export { DuplicateHrcStudyError } from "./study-import";
 
+export class InvalidStoredStudyError extends Error {}
+
 export type AdminStudy = {
   id: string;
   name: string;
@@ -68,6 +70,11 @@ export async function importHrcStudy(study: HrcStudyImport, importedBy: string):
 }
 
 export async function setStudyPublished(studyId: string, published: boolean) {
+  if (published) {
+    const [study] = await getDb().select({ metadata: trainingSets.metadata }).from(trainingSets).where(eq(trainingSets.id, studyId)).limit(1);
+    if (!study) return false;
+    if (study.metadata.validationVersion !== 2) throw new InvalidStoredStudyError("Reimporte o estudo com a validação HRC atual antes de publicá-lo.");
+  }
   const [updated] = await getDb().update(trainingSets).set({
     status: published ? "PUBLISHED" : "IMPORTED",
     isPublished: published,

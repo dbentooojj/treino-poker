@@ -3,12 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type TrainingSession, type TrainingType } from "../lib/training";
-import { DatabaseTrainer, TrainingSetup } from "./training-experience";
+import { type TrainingReport, type TrainingSession, type TrainingType } from "../lib/training";
+import { suitColorClass } from "../lib/poker/cards";
+import { DatabaseTrainer, TrainingReportView, TrainingSetup } from "./training-experience";
 
 type ActionName = "Fold" | "Check" | "Call" | "Bet" | "Raise" | "All-in";
 type StatState = { answered: number; correct: number; errors: number; topics: Record<string, number> };
 type CurrentUser = { id:string; name:string; email:string; role:"admin"|"user" };
+const LAST_TRAINING_SESSION_KEY = "rangelab:last-training-session";
 
 const modes = ["Pre-flop", "Pós-flop", "Cash Game", "Torneio", "Short Stack", "Heads-Up", "Aleatório"];
 const allActions: ActionName[] = ["Fold", "Check", "Call", "Bet", "Raise", "All-in"];
@@ -53,13 +55,12 @@ const handStreets = [
 ];
 
 function Card({ rank, suit }: { rank: string; suit: string }) {
-  const red = suit === "♥" || suit === "♦";
-  return <div className={`playing-card ${red ? "red-suit" : "black-suit"}`}><span>{rank}</span><b>{suit}</b></div>;
+  return <div className={`playing-card ${suitColorClass(suit)}`}><span>{rank}</span><b>{suit}</b></div>;
 }
 
 function BoardCard({ value }: { value: string }) {
-  const rank = value.slice(0, -1), suit = value.slice(-1), red = suit === "♥" || suit === "♦";
-  return <div className={`board-card ${red ? "red-suit" : ""}`}><b>{rank}</b><span>{suit}</span></div>;
+  const rank = value.slice(0, -1), suit = value.slice(-1);
+  return <div className={`board-card ${suitColorClass(suit)}`}><b>{rank}</b><span>{suit}</span></div>;
 }
 
 function MiniTable() {
@@ -121,22 +122,58 @@ void Trainer;
 
 export default function Home() {
   const router = useRouter();
-  const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
+  const [setupOpen,setSetupOpen]=useState(false), [preferredType,setPreferredType]=useState<TrainingType|undefined>(), [trainingSession,setTrainingSession]=useState<TrainingSession|null>(null), [trainingReport,setTrainingReport]=useState<TrainingReport|null>(null), [currentUser,setCurrentUser]=useState<CurrentUser|null>(null), [authReady,setAuthReady]=useState(false);
   useEffect(()=>{
-    let active=true;
-    fetch("/api/auth/me",{cache:"no-store"})
-      .then(async response=>response.ok?await response.json() as {user:CurrentUser|null}:{user:null})
-      .then(data=>{if(active){setCurrentUser(data.user??null);setAuthReady(true);}})
-      .catch(()=>{if(active){setCurrentUser(null);setAuthReady(true);}});
-    return()=>{active=false;};
+    const controller = new AbortController();
+    async function restoreUserAndTraining() {
+      try {
+        const authResponse = await fetch("/api/auth/me", { cache: "no-store", signal: controller.signal });
+        const authData = authResponse.ok ? await authResponse.json() as { user: CurrentUser | null } : { user: null };
+        if (controller.signal.aborted) return;
+        setCurrentUser(authData.user ?? null);
+        if (authData.user) {
+          let restored = false;
+          const savedSessionId = window.sessionStorage.getItem(LAST_TRAINING_SESSION_KEY);
+          if (savedSessionId && /^[0-9a-f-]{36}$/i.test(savedSessionId)) {
+            const savedResponse = await fetch(`/api/training/session?id=${encodeURIComponent(savedSessionId)}`, { cache: "no-store", signal: controller.signal });
+            if (savedResponse.ok) {
+              const savedData = await savedResponse.json() as { session?: TrainingSession; report?: TrainingReport };
+              if (!controller.signal.aborted && savedData.session) setTrainingSession(savedData.session);
+              if (!controller.signal.aborted && savedData.report) setTrainingReport(savedData.report);
+              restored = Boolean(savedData.session || savedData.report);
+            }
+            if (!restored) window.sessionStorage.removeItem(LAST_TRAINING_SESSION_KEY);
+          }
+          if (!restored) {
+            const trainingResponse = await fetch("/api/training/session?active=1", { cache: "no-store", signal: controller.signal });
+            const trainingData = trainingResponse.ok ? await trainingResponse.json() as { session: TrainingSession | null } : { session: null };
+            if (!controller.signal.aborted) setTrainingSession(trainingData.session);
+            if (trainingData.session) window.sessionStorage.setItem(LAST_TRAINING_SESSION_KEY, trainingData.session.id);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setCurrentUser(null);
+          setTrainingSession(null);
+          setTrainingReport(null);
+        }
+      } finally {
+        if (!controller.signal.aborted) setAuthReady(true);
+      }
+    }
+    void restoreUserAndTraining();
+    return()=>controller.abort();
   },[]);
   const isAdmin=currentUser?.role==="admin";
+  function rememberTraining(session:TrainingSession){window.sessionStorage.setItem(LAST_TRAINING_SESSION_KEY,session.id);setTrainingReport(null);setTrainingSession(session);}
+  function leaveTraining(){window.sessionStorage.removeItem(LAST_TRAINING_SESSION_KEY);setTrainingSession(null);setTrainingReport(null);}
   function openTrainingSetup(){if(!authReady)return;if(!currentUser){router.push("/login");return;}setPreferredType(undefined);setSetupOpen(true);}
-  async function logout(){await fetch("/api/auth/logout",{method:"POST"});setCurrentUser(null);router.refresh();}
-  if(trainingSession)return <DatabaseTrainer key={trainingSession.id} session={trainingSession} onExit={()=>setTrainingSession(null)} onStarted={setTrainingSession}/>;
-  return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal">{currentUser&&<Link href="/progresso">Progresso</Link>}<Link href="/ferramentas">Ferramentas</Link>{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
+  async function logout(){await fetch("/api/auth/logout",{method:"POST"});leaveTraining();setCurrentUser(null);router.refresh();}
+  if(trainingReport&&currentUser)return <TrainingReportView report={trainingReport} onExit={leaveTraining} onStarted={rememberTraining}/>;
+  if(trainingSession&&currentUser)return <DatabaseTrainer key={trainingSession.id} session={trainingSession} user={currentUser} onExit={leaveTraining} onStarted={rememberTraining}/>;
+  return <main className="site-shell"><header className="topbar"><div className="topbar-primary"><a className="brand" href="#top"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></a><nav className="nav-links" aria-label="Navegação principal">{currentUser&&<Link href="/progresso">Progresso</Link>}{currentUser&&<Link href="/ferramentas">Ferramentas</Link>}{isAdmin&&<Link href="/admin/studies">Estudos HRC</Link>}</nav></div><div className="top-actions">{currentUser?<><Link className="user-chip user-chip-link" href="/conta" aria-label="Abrir minha conta"><i>{currentUser.name.charAt(0).toUpperCase()}</i><b>{currentUser.name}</b>{isAdmin&&<small>ADM</small>}<span aria-hidden="true">›</span></Link><button className="logout-button" onClick={logout}>Sair</button></>:<Link className="login-button" href="/login">Entrar</Link>}</div></header>
     <section className="hero" id="top"><div className="hero-copy"><div className="eyebrow"><span className="live-dot"/> EVOLUA SUAS DECISÕES · TEXAS HOLD’EM</div><h1>Pare de adivinhar.<br/><em>Jogue com vantagem.</em></h1><p>Transforme cada spot em uma decisão mais confiante. Treine mãos completas, receba feedback objetivo e leve uma estratégia mais sólida para suas mesas.</p><div className="hero-actions"><button className="primary-button" onClick={openTrainingSetup} disabled={!authReady}><span>▶</span> {currentUser?"Começar treinamento":"Começar agora"}</button></div><div className="concept-row">{['Range','Pot odds','Equidade','Blockers','SPR','ICM'].map(i=><span key={i}>{i}</span>)}</div></div><MiniTable/></section>
     <section className="promise-grid" id="treinar"><article><span>01</span><h2>Spots reais do estudo.</h2><p>Enfrente decisões que fazem parte da rotina de quem joga torneios.</p></article><article><span>02</span><h2>Frequências e EVs.</h2><p>Veja o impacto de cada escolha e descubra onde está o seu maior ganho.</p></article><article id="progresso"><span>03</span><h2>Configuração sem atalhos.</h2><p>Personalize o treino para o seu momento de jogo e evolua com consistência.</p></article></section>
-    {setupOpen&&<TrainingSetup preferredType={preferredType} onClose={()=>setSetupOpen(false)} onStarted={(session)=>{setSetupOpen(false);setTrainingSession(session);}}/>}
+    {setupOpen&&<TrainingSetup preferredType={preferredType} onClose={()=>setSetupOpen(false)} onStarted={(session)=>{setSetupOpen(false);rememberTraining(session);}}/>}
   </main>;
 }
