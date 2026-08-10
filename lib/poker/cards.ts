@@ -23,6 +23,12 @@ export const SUIT_NAMES: Record<Suit, string> = {
   c: "paus",
 };
 
+export function suitColorClass(suit: Suit | string): `suit-${Suit}` {
+  const normalizedSuit = SUITS.find((candidate) => candidate === suit || SUIT_SYMBOLS[candidate] === suit);
+  if (!normalizedSuit) throw new Error(`Naipe inválido: ${suit}`);
+  return `suit-${normalizedSuit}`;
+}
+
 export const RANK_NAMES: Record<Rank, string> = {
   A: "Ás",
   K: "Rei",

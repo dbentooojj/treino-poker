@@ -6,6 +6,7 @@ import {
   answerTrainingSession,
   createTrainingSession,
   finishTrainingSession,
+  getActiveTrainingSession,
   getTrainingReport,
   type SessionStartRequest,
 } from "../../../../db/training";
@@ -16,9 +17,15 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const user = await getSessionUser(request);
-    if (!user) return Response.json({ error: "Faça login para ver o relatório." }, { status: 401 });
-    const sessionId = new URL(request.url).searchParams.get("id");
+    if (!user) return Response.json({ error: "Faça login para ver a sessão." }, { status: 401 });
+    const searchParams = new URL(request.url).searchParams;
+    if (searchParams.get("active") === "1") {
+      return Response.json({ session: await getActiveTrainingSession(user.id) }, noStore());
+    }
+    const sessionId = searchParams.get("id");
     if (!validId(sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
+    const activeSession = await getActiveTrainingSession(user.id, sessionId);
+    if (activeSession) return Response.json({ session: activeSession }, noStore());
     return Response.json({ report: await getTrainingReport(user.id, sessionId) }, noStore());
   } catch (error) {
     return errorResponse(error, "Não foi possível carregar o relatório.");
@@ -47,11 +54,12 @@ export async function PATCH(request: Request) {
     const payload = await request.json() as Record<string, unknown>;
     if (!validId(payload.sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
     if (payload.operation === "FINISH") return Response.json({ report: await finishTrainingSession(user.id, payload.sessionId) }, noStore());
-    if (payload.operation !== "ANSWER" || !validId(payload.trainingNodeId) || !validId(payload.trainingHandId) || typeof payload.selectedAction !== "string" || payload.selectedAction.length > 100) {
+    if (payload.operation !== "ANSWER" || !Number.isSafeInteger(payload.questionIndex) || Number(payload.questionIndex) < 0 || !validId(payload.trainingNodeId) || !validId(payload.trainingHandId) || typeof payload.selectedAction !== "string" || payload.selectedAction.length > 100) {
       return Response.json({ error: "Resposta inválida." }, { status: 400 });
     }
     return Response.json(await answerTrainingSession(user.id, {
       sessionId: payload.sessionId,
+      questionIndex: Number(payload.questionIndex),
       trainingNodeId: payload.trainingNodeId,
       trainingHandId: payload.trainingHandId,
       selectedAction: payload.selectedAction,

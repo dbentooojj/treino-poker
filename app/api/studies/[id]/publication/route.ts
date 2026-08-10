@@ -1,5 +1,5 @@
 import { getSessionUser, isTrustedOrigin } from "../../../../../db/auth";
-import { getStudiesAdminData, setStudyPublished } from "../../../../../db/studies";
+import { InvalidStoredStudyError, getStudiesAdminData, setStudyPublished } from "../../../../../db/studies";
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -15,7 +15,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (typeof body.published !== "boolean") return Response.json({ error: "Estado de publicação inválido." }, { status: 400 });
     if (!await setStudyPublished(id, body.published)) return Response.json({ error: "Estudo não encontrado." }, { status: 404 });
     return Response.json({ data: await getStudiesAdminData() }, { headers: { "Cache-Control": "private, no-store, max-age=0" } });
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidStoredStudyError) return Response.json({ error: error.message }, { status: 409 });
     return Response.json({ error: "Não foi possível alterar a publicação do estudo." }, { status: 500 });
   }
 }

@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import { getDb } from "../../../db/index";
+import { validateProductionConfiguration } from "../../../lib/server-config";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+    validateProductionConfiguration();
     await getDb().execute(sql`select 1`);
     return Response.json({ status: "ok" }, { headers: { "Cache-Control": "no-store" } });
   } catch {

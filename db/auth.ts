@@ -2,11 +2,13 @@ import { and, eq, gt, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
 import { authRateLimits, passwordResetTokens, sessions, users } from "./schema";
+import { publicAppOrigin, secureCookiesRequired } from "../lib/server-config";
 
 const SESSION_COOKIE = "rangelab_session";
 const PASSWORD_ITERATIONS = 310_000;
 const SESSION_DAY_SECONDS = 60 * 60 * 24;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+const RESET_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export type AuthUser = {
   id: string;
@@ -33,10 +35,36 @@ export async function registerUser(name: string, email: string, password: string
   const now = new Date();
 
   try {
-    const role = await db.transaction(async (tx) => {
+    await db.insert(users).values({
+      id,
+      name: name.trim(),
+      email: normalizedEmail,
+      passwordHash: hash,
+      passwordSalt: salt,
+      passwordIterations: PASSWORD_ITERATIONS,
+      role: "user",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { id, name: name.trim(), email: normalizedEmail, role: "user" } satisfies AuthUser;
+  } catch (error) {
+    if (hasPostgresErrorCode(error, "23505")) throw new Error("EMAIL_IN_USE");
+    throw error;
+  }
+}
+
+export async function createInitialAdmin(name: string, email: string, password: string) {
+  const db = getDb();
+  const normalizedEmail = normalizeEmail(email);
+  const { hash, salt } = await hashPassword(password);
+  const id = crypto.randomUUID();
+  const now = new Date();
+
+  try {
+    await db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(846213579)`);
-      const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(users);
-      const selectedRole: AuthUser["role"] = count === 0 ? "admin" : "user";
+      const [existingAdmin] = await tx.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
+      if (existingAdmin) throw new Error("ADMIN_ALREADY_EXISTS");
       await tx.insert(users).values({
         id,
         name: name.trim(),
@@ -44,14 +72,14 @@ export async function registerUser(name: string, email: string, password: string
         passwordHash: hash,
         passwordSalt: salt,
         passwordIterations: PASSWORD_ITERATIONS,
-        role: selectedRole,
+        role: "admin",
         createdAt: now,
         updatedAt: now,
       });
-      return selectedRole;
     });
-    return { id, name: name.trim(), email: normalizedEmail, role } satisfies AuthUser;
+    return { id, name: name.trim(), email: normalizedEmail, role: "admin" } satisfies AuthUser;
   } catch (error) {
+    if (error instanceof Error && error.message === "ADMIN_ALREADY_EXISTS") throw error;
     if (hasPostgresErrorCode(error, "23505")) throw new Error("EMAIL_IN_USE");
     throw error;
   }
@@ -113,27 +141,42 @@ export async function createPasswordReset(email: string): Promise<string | null>
   const token = randomToken(32);
   const id = await hashToken(token);
   const now = new Date();
-  await getDb().transaction(async (tx) => {
-    await tx.delete(passwordResetTokens).where(sql`${passwordResetTokens.userId} = ${user.id} OR ${passwordResetTokens.expiresAt} <= ${now}`);
-    await tx.insert(passwordResetTokens).values({ id, userId: user.id, expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS), createdAt: now });
-  });
+  await getDb().insert(passwordResetTokens)
+    .values({ id, userId: user.id, expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS), createdAt: now })
+    .onConflictDoUpdate({
+      target: passwordResetTokens.userId,
+      set: { id, expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS), usedAt: null, createdAt: now },
+    });
+  await getDb().delete(passwordResetTokens).where(and(ne(passwordResetTokens.userId, user.id), lte(passwordResetTokens.expiresAt, now)));
   return token;
 }
 
 export async function resetPassword(token: string, password: string) {
+  if (!isPasswordResetToken(token)) return false;
   const id = await hashToken(token);
   const now = new Date();
+  const [available] = await getDb().select({ id: passwordResetTokens.id })
+    .from(passwordResetTokens)
+    .where(and(eq(passwordResetTokens.id, id), sql`${passwordResetTokens.usedAt} IS NULL`, gt(passwordResetTokens.expiresAt, now)))
+    .limit(1);
+  if (!available) return false;
   const { hash, salt } = await hashPassword(password);
+  const claimedAt = new Date();
   return getDb().transaction(async (tx) => {
     const [claimed] = await tx.update(passwordResetTokens)
-      .set({ usedAt: now })
-      .where(and(eq(passwordResetTokens.id, id), sql`${passwordResetTokens.usedAt} IS NULL`, gt(passwordResetTokens.expiresAt, now)))
+      .set({ usedAt: claimedAt })
+      .where(and(eq(passwordResetTokens.id, id), sql`${passwordResetTokens.usedAt} IS NULL`, gt(passwordResetTokens.expiresAt, claimedAt)))
       .returning({ userId: passwordResetTokens.userId });
     if (!claimed) return false;
-    await tx.update(users).set({ passwordHash: hash, passwordSalt: salt, passwordIterations: PASSWORD_ITERATIONS, updatedAt: now }).where(eq(users.id, claimed.userId));
+    await tx.update(users).set({ passwordHash: hash, passwordSalt: salt, passwordIterations: PASSWORD_ITERATIONS, updatedAt: claimedAt }).where(eq(users.id, claimed.userId));
     await tx.delete(sessions).where(eq(sessions.userId, claimed.userId));
+    await tx.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, claimed.userId));
     return true;
   });
+}
+
+export function isPasswordResetToken(value: unknown): value is string {
+  return typeof value === "string" && RESET_TOKEN_PATTERN.test(value);
 }
 
 export type AccountUpdateResult =
@@ -174,7 +217,7 @@ export async function changeUserPassword(userId: string, currentPassword: string
 }
 
 export async function consumeAuthRateLimit(request: Request, scope: string, discriminator: string, limit: number, windowMs: number) {
-  const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const ip = authRateLimitClientIp(request);
   const id = await hashToken(`${scope}:${ip}:${normalizeEmail(discriminator)}`);
   const now = new Date();
   const windowStart = new Date(now.getTime() - windowMs);
@@ -195,6 +238,14 @@ export async function consumeAuthRateLimit(request: Request, scope: string, disc
   return row.hits <= limit;
 }
 
+export function consumeAuthIpRateLimit(request: Request, scope: string, limit: number, windowMs: number) {
+  return consumeAuthRateLimit(request, scope, "", limit, windowMs);
+}
+
+export function authRateLimitClientIp(request: Request) {
+  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+}
+
 async function findUserWithPassword(userId: string): Promise<UserWithPassword | undefined> {
   const [row] = await getDb().select({
     id: users.id, name: users.name, email: users.email, role: users.role,
@@ -211,7 +262,7 @@ export function isTrustedOrigin(request: Request) {
   const origin = request.headers.get("origin");
   if (!origin) return true;
   try {
-    const expected = process.env.APP_BASE_URL ? new URL(process.env.APP_BASE_URL).origin : new URL(request.url).origin;
+    const expected = publicAppOrigin(process.env, request.url);
     return origin === expected;
   } catch {
     return false;
@@ -219,23 +270,11 @@ export function isTrustedOrigin(request: Request) {
 }
 
 export function sessionCookie(token: string, maxAge: number) {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${shouldUseSecureCookies() ? "; Secure" : ""}`;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureCookiesRequired() ? "; Secure" : ""}`;
 }
 
 export function clearSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${shouldUseSecureCookies() ? "; Secure" : ""}`;
-}
-
-function shouldUseSecureCookies() {
-  const baseUrl = process.env.APP_BASE_URL?.trim();
-  if (baseUrl) {
-    try {
-      return new URL(baseUrl).protocol === "https:";
-    } catch {
-      return process.env.NODE_ENV === "production";
-    }
-  }
-  return process.env.NODE_ENV === "production";
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookiesRequired() ? "; Secure" : ""}`;
 }
 
 async function hashPassword(password: string, suppliedSalt?: string) {

@@ -15,6 +15,27 @@
       "when": 1786207008882,
       "tag": "0001_perpetual_squirrel_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786323042625,
+      "tag": "0002_overjoyed_rage",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786324172534,
+      "tag": "0003_oval_glorian",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786324716193,
+      "tag": "0004_young_giant_girl",
+      "breakpoints": true
     }
   ]
 }

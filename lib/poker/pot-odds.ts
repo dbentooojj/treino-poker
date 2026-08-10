@@ -5,3 +5,13 @@ export function calculateRequiredEquity(pot: number, call: number): number {
   const finalPot = pot + call;
   return finalPot === 0 ? 0 : call / finalPot;
 }
+
+export function calculateCallEV(equity: number, pot: number, call: number): number {
+  if (!Number.isFinite(equity) || equity < 0 || equity > 1) {
+    throw new Error("A equity deve estar entre zero e um.");
+  }
+  if (!Number.isFinite(pot) || !Number.isFinite(call) || pot < 0 || call < 0) {
+    throw new Error("Pote e valor para pagar devem ser números não negativos.");
+  }
+  return equity * (pot + call) - call;
+}

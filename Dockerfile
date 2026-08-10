@@ -16,8 +16,9 @@ CMD ["npm", "run", "test:integration"]
 
 FROM deps AS migrator
 COPY db ./db
+COPY lib ./lib
 COPY drizzle ./drizzle
-COPY scripts/migrate.ts ./scripts/migrate.ts
+COPY scripts/migrate.ts scripts/create-admin.ts ./scripts/
 COPY drizzle.config.ts tsconfig.json ./
 CMD ["npm", "run", "db:migrate"]
 

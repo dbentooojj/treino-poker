@@ -1,9 +1,13 @@
 export const TRAINING_TYPES = ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN"] as const;
 export const EQUITY_MODELS = ["CHIP_EV", "ICM"] as const;
+export const EV_UNITS = ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"] as const;
 export const QUESTION_COUNTS = [20, 50, 100] as const;
+export const MIN_STRATEGY_FREQUENCY_PERCENT = 5;
+export const MAX_EXERCISE_QUEUE_SIZE = 100;
 
 export type TrainingType = (typeof TRAINING_TYPES)[number];
 export type EquityModel = (typeof EQUITY_MODELS)[number];
+export type EvUnit = (typeof EV_UNITS)[number];
 export type TrainingActionType = "FOLD" | "CHECK" | "CALL" | "BET" | "RAISE";
 export type CompletionReason = "COMPLETED" | "USER_FINISHED";
 
@@ -56,6 +60,7 @@ export type TrainingExercise = QueueEntry & {
   handClass: string;
   trainingType: TrainingType;
   equityModel: EquityModel;
+  evUnit: EvUnit;
   playersCount: number;
   heroStackBb: number;
   heroPosition: string;
@@ -72,6 +77,37 @@ export type AnswerEvaluation = {
   bestLabel: string;
   strategy: Record<string, number>;
   evs: Record<string, number>;
+  decisionClarity: number | null;
+  isMixed: boolean;
+};
+
+export type NodeRangeHand = {
+  handClass: string;
+  strategy: Record<string, number>;
+  evs: Record<string, number>;
+  bestAction: string | null;
+  decisionClarity: number | null;
+  isMixed: boolean;
+};
+
+export type NodeRange = {
+  trainingSetId: string;
+  trainingNodeId: string;
+  hands: NodeRangeHand[];
+};
+
+export type StrategyActionPresentation = {
+  action: TrainingAction;
+  key: string;
+  frequency: number | null;
+  frequencyPercent: number | null;
+  isInStrategy: boolean;
+};
+
+export type StrategyPresentation = {
+  actions: StrategyActionPresentation[];
+  isMixed: boolean;
+  dominantAction: StrategyActionPresentation | null;
 };
 
 export type TrainingSession = {
@@ -87,6 +123,9 @@ export type TrainingSession = {
 export type ReportGroup = { label: string; answered: number; correct: number; accuracy: number };
 export type TrainingReport = {
   sessionId: string;
+  detailsAvailable: boolean;
+  detailsTruncated: boolean;
+  detailAnswers: number;
   completionReason: CompletionReason;
   trainingType: TrainingType;
   equityModel: EquityModel;
@@ -157,14 +196,108 @@ export function recordValue(record: Record<string, number>, action: TrainingActi
   return null;
 }
 
-export function evaluateChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, evs: Record<string, number>) {
+export function isValidStrategy(strategy: Record<string, number>, actions: TrainingAction[]) {
+  if (!actions.length || Object.keys(strategy).length !== actions.length) return false;
+  const matchedKeys = actions.map((action) => actionAliases(action).find((alias) => Object.hasOwn(strategy, alias)) ?? null);
+  if (matchedKeys.some((key) => key === null) || new Set(matchedKeys).size !== actions.length || Object.keys(strategy).some((key) => !matchedKeys.includes(key))) return false;
+  const values = matchedKeys.map((key) => strategy[key!]);
+  if (values.some((value) => value === null || !Number.isFinite(value) || value < 0)) return false;
+  const frequencies = values as number[];
+  const total = frequencies.reduce((sum, value) => sum + value, 0);
+  if (Math.abs(total - 1) <= 0.000001) return frequencies.every((value) => value <= 1.000001);
+  if (Math.abs(total - 100) <= 0.0001) return frequencies.every((value) => value <= 100.0001);
+  return false;
+}
+
+/** HRC imports fractions; callers with a complete legacy vector pass its total. */
+export function frequencyPercent(value: number | null, vectorTotal = 1) {
+  if (value === null || !Number.isFinite(value)) return null;
+  const multiplier = Math.abs(vectorTotal - 100) <= 0.0001 ? 1 : 100;
+  return Math.max(0, Math.min(100, value * multiplier));
+}
+
+export function presentStrategy(strategy: Record<string, number>, actions: TrainingAction[], mixedHint?: boolean): StrategyPresentation {
+  const vectorTotal = strategyVectorTotal(strategy, actions);
+  const presented = actions.map((action) => {
+    const frequency = recordValue(strategy, action);
+    const percentage = frequencyPercent(frequency, vectorTotal);
+    return {
+      action,
+      key: actionKey(action),
+      frequency,
+      frequencyPercent: percentage,
+      isInStrategy: percentage !== null && percentage >= MIN_STRATEGY_FREQUENCY_PERCENT,
+    };
+  });
+  const actionable = presented.filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null && item.frequencyPercent >= MIN_STRATEGY_FREQUENCY_PERCENT);
+  const dominantAction = [...presented].filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null)
+    .sort((left, right) => right.frequencyPercent - left.frequencyPercent)[0] ?? null;
+  return { actions: presented, isMixed: mixedHint ?? actionable.length > 1, dominantAction };
+}
+
+export function rangeActionShares(strategy: Record<string, number>, actions: TrainingAction[]) {
+  const vectorTotal = strategyVectorTotal(strategy, actions);
+  let actionPercent = 0;
+  let foldPercent = 0;
+  let hasData = false;
+  for (const action of actions) {
+    const percentage = frequencyPercent(recordValue(strategy, action), vectorTotal);
+    if (percentage === null) continue;
+    hasData = true;
+    if (action.type === "FOLD") foldPercent += percentage;
+    else actionPercent += percentage;
+  }
+  const total = actionPercent + foldPercent;
+  const scale = total > 100 ? 100 / total : 1;
+  return {
+    actionPercent: actionPercent * scale,
+    foldPercent: foldPercent * scale,
+    totalPercent: Math.min(100, total),
+    hasData,
+  };
+}
+
+function strategyVectorTotal(strategy: Record<string, number>, actions: TrainingAction[]) {
+  return actions.reduce((total, action) => {
+    const value = recordValue(strategy, action);
+    return value !== null && Number.isFinite(value) ? total + value : total;
+  }, 0);
+}
+
+export const RANGE_RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"] as const;
+
+export type RangeMatrixCell = {
+  handClass: string;
+  row: number;
+  column: number;
+  pair: boolean;
+  suited: boolean;
+  offsuit: boolean;
+};
+
+export function buildRangeMatrix(): RangeMatrixCell[] {
+  return RANGE_RANKS.flatMap((highRank, row) => RANGE_RANKS.map((lowRank, column) => ({
+    row,
+    column,
+    pair: row === column,
+    suited: row < column,
+    offsuit: row > column,
+    handClass: row === column ? `${highRank}${lowRank}` : row < column ? `${highRank}${lowRank}s` : `${lowRank}${highRank}o`,
+  })));
+}
+
+export function evaluateChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, evs: Record<string, number>, strategy?: Record<string, number>) {
   const selected = actions.find((action) => actionAliases(action).includes(selectedKey));
   if (!selected) return null;
   const values = actions.map((action) => ({ action, key: actionKey(action), value: recordValue(evs, action) }));
   const evBest = values.filter((item): item is typeof item & { value: number } => item.value !== null).sort((left, right) => right.value - left.value)[0];
   const configured = bestAction ? values.find((item) => actionAliases(item.action).includes(bestAction)) : undefined;
   const best = configured ?? evBest ?? values[0];
-  return { correct: sameAction(selected, best.action), selected, selectedKey: actionKey(selected), bestKey: best.key, bestLabel: best.action.label ?? best.key };
+  const presented = strategy && isValidStrategy(strategy, actions) ? presentStrategy(strategy, actions) : null;
+  const hasFrequencyData = presented?.actions.some((item) => item.frequencyPercent !== null) ?? false;
+  const selectedStrategy = presented?.actions.find((item) => sameAction(item.action, selected));
+  const correct = hasFrequencyData ? Boolean(selectedStrategy?.isInStrategy) : sameAction(selected, best.action);
+  return { correct, selected, selectedKey: actionKey(selected), bestKey: best.key, bestLabel: best.action.label ?? best.key };
 }
 
 export function fisherYates<T>(values: readonly T[], random: () => number = Math.random): T[] {
@@ -178,10 +311,14 @@ export function fisherYates<T>(values: readonly T[], random: () => number = Math
 
 export function buildExerciseQueue(entries: readonly QueueEntry[], targetQuestions: number | null, random: () => number = Math.random, previousQueue?: readonly QueueEntry[]) {
   if (!entries.length) return [];
-  const target = targetQuestions ?? entries.length;
+  if (targetQuestions !== null && (!Number.isInteger(targetQuestions) || targetQuestions <= 0 || targetQuestions > MAX_EXERCISE_QUEUE_SIZE)) {
+    throw new RangeError(`A fila deve conter entre 1 e ${MAX_EXERCISE_QUEUE_SIZE} exercícios.`);
+  }
+  const pool = entries.slice(0, MAX_EXERCISE_QUEUE_SIZE);
+  const target = targetQuestions ?? pool.length;
   const result: QueueEntry[] = [];
   while (result.length < target) {
-    const cycle = fisherYates(entries, random);
+    const cycle = fisherYates(pool, random);
     const previous = result.at(-1);
     if (previous && cycle.length > 1 && sameQueueEntry(previous, cycle[0])) [cycle[0], cycle[1]] = [cycle[1], cycle[0]];
     result.push(...cycle.slice(0, target - result.length));
