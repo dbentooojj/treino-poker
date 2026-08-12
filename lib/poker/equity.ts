@@ -28,8 +28,9 @@ export type EquityResult = {
   tieRate: number;
   heroEquity: number;
   villainEquity: number;
-  /** Cartas da próxima street que deixam o Hero estritamente à frente; disponível no flop/turn contra mão exata. */
+  /** Outs imediatos do jogador que está atrás; disponível no flop/turn contra mão exata. */
   outs: number | null;
+  outsOwner: "hero" | "villain" | null;
   method: "exact" | "monte-carlo";
 };
 
@@ -138,6 +139,7 @@ function finalize(
   ties: number,
   method: EquityResult["method"],
   outs: number | null = null,
+  outsOwner: EquityResult["outsOwner"] = null,
 ): EquityResult {
   const total = heroWins + villainWins + ties;
   const heroWinRate = heroWins / total;
@@ -154,6 +156,7 @@ function finalize(
     heroEquity: heroWinRate + tieRate / 2,
     villainEquity: villainWinRate + tieRate / 2,
     outs,
+    outsOwner,
     method,
   };
 }
@@ -190,14 +193,23 @@ function classifyExactTurnRivers(input: EquityInput): ExactTurnOutcomes {
   return { heroWins, villainWins, ties, winningRivers };
 }
 
-function classifyExactWinningNextCards(input: EquityInput): PokerCard[] {
-  return availableCards(input).filter((nextCard) => {
+function classifyExactOuts(input: EquityInput): { cards: PokerCard[]; owner: EquityResult["outsOwner"] } {
+  const currentComparison = compareHands(
+    [...input.hero, ...input.board],
+    [...input.villain, ...input.board],
+  );
+  if (currentComparison === 0) return { cards: [], owner: null };
+
+  const owner = currentComparison < 0 ? "hero" : "villain";
+  const cards = availableCards(input).filter((nextCard) => {
     const nextBoard = [...input.board, nextCard];
-    return compareHands(
+    const nextComparison = compareHands(
       [...input.hero, ...nextBoard],
       [...input.villain, ...nextBoard],
-    ) > 0;
+    );
+    return owner === "hero" ? nextComparison > 0 : nextComparison < 0;
   });
+  return { cards, owner };
 }
 
 /**
@@ -207,7 +219,8 @@ function classifyExactWinningNextCards(input: EquityInput): PokerCard[] {
 export function calculateFlopOuts(input: EquityInput): PokerCard[] | null {
   validateInput(input);
   if (input.board.length !== 3 || input.villain.length !== 2 || input.villainRange) return null;
-  return classifyExactWinningNextCards(input);
+  const result = classifyExactOuts(input);
+  return result.owner === "hero" ? result.cards : [];
 }
 
 /**
@@ -217,7 +230,8 @@ export function calculateFlopOuts(input: EquityInput): PokerCard[] | null {
 export function calculateTurnOuts(input: EquityInput): PokerCard[] | null {
   validateInput(input);
   if (input.board.length !== 4 || input.villain.length !== 2 || input.villainRange) return null;
-  return classifyExactTurnRivers(input).winningRivers;
+  const result = classifyExactOuts(input);
+  return result.owner === "hero" ? result.cards : [];
 }
 
 export function calculateEquity(input: EquityInput, options: EquityOptions = {}): EquityResult {
@@ -233,8 +247,8 @@ export function calculateEquity(input: EquityInput, options: EquityOptions = {})
   let heroWins = 0;
   let villainWins = 0;
   let ties = 0;
-  const flopOuts = !input.villainRange && input.villain.length === 2 && input.board.length === 3
-    ? classifyExactWinningNextCards(input).length
+  const nextCardOuts = !input.villainRange && input.villain.length === 2 && (input.board.length === 3 || input.board.length === 4)
+    ? classifyExactOuts(input)
     : null;
 
   if (!input.villainRange && input.villain.length === 2 && input.board.length === 4) {
@@ -244,7 +258,8 @@ export function calculateEquity(input: EquityInput, options: EquityOptions = {})
       turnOutcomes.villainWins,
       turnOutcomes.ties,
       "exact",
-      turnOutcomes.winningRivers.length,
+      nextCardOuts?.cards.length ?? null,
+      nextCardOuts?.owner ?? null,
     );
   }
 
@@ -288,7 +303,14 @@ export function calculateEquity(input: EquityInput, options: EquityOptions = {})
     forEachCombination(deck, boardNeeded, (runout) => {
       record(input.villain, [...input.board, ...runout]);
     });
-    return finalize(heroWins, villainWins, ties, "exact", flopOuts);
+    return finalize(
+      heroWins,
+      villainWins,
+      ties,
+      "exact",
+      nextCardOuts?.cards.length ?? null,
+      nextCardOuts?.owner ?? null,
+    );
   }
 
   const random = options.seed === undefined ? Math.random : createSeededRandom(options.seed);
@@ -299,5 +321,12 @@ export function calculateEquity(input: EquityInput, options: EquityOptions = {})
     const runout = sampled.slice(villainNeeded);
     record(villain, [...input.board, ...runout]);
   }
-  return finalize(heroWins, villainWins, ties, "monte-carlo", flopOuts);
+  return finalize(
+    heroWins,
+    villainWins,
+    ties,
+    "monte-carlo",
+    nextCardOuts?.cards.length ?? null,
+    nextCardOuts?.owner ?? null,
+  );
 }

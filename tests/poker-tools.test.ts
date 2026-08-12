@@ -326,7 +326,24 @@ test("flop exato conta somente os três noves que colocam o Hero à frente no tu
   const outs = calculateFlopOuts(FLOP_OUTS_FIXTURE);
   assert.ok(outs);
   assert.deepEqual(new Set(outs.map(cardKey)), new Set(["9h", "9d", "9c"]));
-  assert.equal(calculateEquity(FLOP_OUTS_FIXTURE).outs, 3);
+  const result = calculateEquity(FLOP_OUTS_FIXTURE);
+  assert.equal(result.outs, 3);
+  assert.equal(result.outsOwner, "hero");
+});
+
+test("quando o Hero já está à frente, exibe somente os outs imediatos do Vilão", () => {
+  const input = {
+    hero: cards("Jh", "Jc"),
+    villain: cards("As", "Ah"),
+    board: cards("Jd", "7h", "4s"),
+  };
+  const result = calculateEquity(input);
+  const html = renderToStaticMarkup(createElement(EquityResult, { result }));
+
+  assert.deepEqual(calculateFlopOuts(input), []);
+  assert.equal(result.outs, 2);
+  assert.equal(result.outsOwner, "villain");
+  assert.match(html, /<div class="outs"><dt>Outs do Vilão<\/dt><dd>2<\/dd><\/div>/);
 });
 
 test("outs do flop não incluem empate nem backdoor dependente do river", () => {
@@ -344,6 +361,7 @@ test("turn exato enumera 14 vitórias, 12 empates e 18 derrotas em 44 rivers", (
     { heroWins: 14, ties: 12, villainWins: 18, total: 44 },
   );
   assert.equal(result.outs, 14);
+  assert.equal(result.outsOwner, "hero");
   assert.equal(result.heroWinRate, 14 / 44);
   assert.equal(result.tieRate, 12 / 44);
   assert.equal(result.villainWinRate, 18 / 44);
@@ -610,6 +628,7 @@ test("resultado visual de Pot Odds exibe a equity do range e o EV do call", () =
       heroEquity,
       villainEquity: 1 - heroEquity,
       outs: null,
+      outsOwner: null,
       method: "exact",
     },
     street: "flop",

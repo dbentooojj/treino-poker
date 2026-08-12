@@ -28,7 +28,8 @@ export type TrainingFilters = {
   heroPosition?: string;
 };
 
-export type TrainingConfig = Required<Pick<TrainingFilters, "trainingType" | "equityModel">> & {
+export type TrainingConfig = Required<Pick<TrainingFilters, "equityModel">> & {
+  trainingType: TrainingType | null;
   stackDepthBb?: number;
   heroPosition?: string;
   targetQuestions: number | null;
@@ -121,13 +122,26 @@ export type TrainingSession = {
 };
 
 export type ReportGroup = { label: string; answered: number; correct: number; accuracy: number };
+export type TrainingDecisionDetail = {
+  questionIndex: number;
+  handClass: string;
+  heroPosition: string;
+  selectedAction: string;
+  selectedKey: string;
+  bestAction: string;
+  isCorrect: boolean;
+  isMixed: boolean;
+  strategy: Record<string, number>;
+  evs: Record<string, number>;
+  evUnit: EvUnit;
+};
 export type TrainingReport = {
   sessionId: string;
   detailsAvailable: boolean;
   detailsTruncated: boolean;
   detailAnswers: number;
   completionReason: CompletionReason;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   equityModel: EquityModel;
   stackDepthBb: number | null;
   heroPosition: string | null;
@@ -142,6 +156,7 @@ export type TrainingReport = {
   byDecisionType: ReportGroup[];
   mostMissedHands: Array<{ handClass: string; errors: number }>;
   errorDetails: Array<{ handClass: string; heroPosition: string; selectedAction: string; bestAction: string }>;
+  decisionDetails: TrainingDecisionDetail[];
   feedback: string[];
 };
 

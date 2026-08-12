@@ -1,7 +1,7 @@
 import { and, desc, eq, gt } from "drizzle-orm";
 import { buildProgressDashboard, type ProgressAnswerRecord, type ProgressSessionRecord } from "../lib/progress";
 import { getDb } from "./index";
-import { trainingAnswers, trainingSessions, trainingSets } from "./schema";
+import { trainingAnswers, trainingNodes, trainingSessions, trainingSets } from "./schema";
 
 const MAX_PROGRESS_SESSIONS = 1_000;
 const MAX_PROGRESS_ANSWERS = 10_000;
@@ -24,7 +24,7 @@ export async function getProgressDashboard(userId: string) {
     .orderBy(desc(trainingSessions.startedAt))
     .limit(MAX_PROGRESS_SESSIONS + 1), db.select({
       sessionId: trainingAnswers.trainingSessionId,
-      trainingType: trainingSessions.trainingType,
+      trainingType: trainingNodes.trainingType,
       equityModel: trainingSessions.equityModel,
       evUnit: trainingAnswers.evUnit,
       trainingNodeId: trainingAnswers.trainingNodeId,
@@ -39,6 +39,7 @@ export async function getProgressDashboard(userId: string) {
       answeredAt: trainingAnswers.answeredAt,
     }).from(trainingAnswers)
       .innerJoin(trainingSessions, eq(trainingSessions.id, trainingAnswers.trainingSessionId))
+      .innerJoin(trainingNodes, eq(trainingNodes.id, trainingAnswers.trainingNodeId))
       .innerJoin(trainingSets, eq(trainingSets.id, trainingAnswers.trainingSetId))
       .where(and(eq(trainingSessions.userId, userId), eq(trainingSessions.answerDetailsAvailable, true)))
       .orderBy(desc(trainingAnswers.answeredAt))

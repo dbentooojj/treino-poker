@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { HrcStudyImport } from "../lib/hrc-import";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
@@ -30,7 +30,8 @@ export class DuplicateHrcStudyError extends Error {
 
 export async function persistHrcStudy(study: HrcStudyImport, importedBy: string): Promise<PersistedHrcStudy> {
   const db = getDb();
-  const [duplicate] = await db.select({ name: trainingSets.name }).from(trainingSets).where(eq(trainingSets.contentHash, study.contentHash)).limit(1);
+  const activeDuplicate = and(eq(trainingSets.contentHash, study.contentHash), ne(trainingSets.status, "ARCHIVED"));
+  const [duplicate] = await db.select({ name: trainingSets.name }).from(trainingSets).where(activeDuplicate).limit(1);
   if (duplicate) throw new DuplicateHrcStudyError(duplicate.name);
 
   const setId = crypto.randomUUID();
@@ -91,7 +92,7 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     });
   } catch (error) {
     if (hasPostgresErrorCode(error, "23505")) {
-      const [existing] = await db.select({ name: trainingSets.name }).from(trainingSets).where(eq(trainingSets.contentHash, study.contentHash)).limit(1);
+      const [existing] = await db.select({ name: trainingSets.name }).from(trainingSets).where(activeDuplicate).limit(1);
       if (existing) throw new DuplicateHrcStudyError(existing.name);
     }
     throw error;

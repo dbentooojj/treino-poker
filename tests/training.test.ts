@@ -146,14 +146,14 @@ test("calcula a proporção exata entre ação e fold para a cor do range", () =
 });
 
 test("cliente restaura sessão ativa e envia índice estável para retries", async () => {
-  const [home, trainer] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  const [workspace, trainer] = await Promise.all([
+    readFile(new URL("../app/treinar/training-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(home, /\/api\/training\/session\?active=1/);
-  assert.match(home, /rangelab:last-training-session/);
-  assert.match(home, /\/api\/training\/session\?id=/, "refresh da última resposta deve recuperar também o relatório encerrado");
-  assert.match(trainer, /questionIndex:\s*stats\.answered/);
+  assert.match(workspace, /\/api\/training\/session\?active=1/);
+  assert.match(workspace, /rangelab:last-training-session/);
+  assert.match(workspace, /\/api\/training\/session\?id=/, "refresh da última resposta deve recuperar também o relatório encerrado");
+  assert.match(trainer, /questionIndex:\s*answeredQuestions/);
 });
 
 function key(entry: QueueEntry) { return `${entry.trainingNodeId}:${entry.trainingHandId}`; }

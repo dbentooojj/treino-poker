@@ -33,6 +33,7 @@ const PUBLISHED_CONDITIONS: SQL[] = [
   eq(trainingSets.isPublished, true),
 ];
 const MAX_REPORT_ANSWER_DETAILS = 1_000;
+type TrainingQueryFilters = Omit<TrainingFilters, "trainingType"> & { trainingType?: TrainingType | null };
 
 export type SessionStartRequest =
   | { mode?: "START"; config: TrainingConfig }
@@ -78,27 +79,26 @@ export async function createTrainingSession(userId: string, request: SessionStar
     previousQueue = source.exerciseQueue;
     if (request.mode === "REVIEW_ERRORS") {
       if (!source.answerDetailsAvailable) throw new NoReviewErrorsError("Os detalhes por mão deste resumo histórico não estão disponíveis para revisão.");
-      const selectedSetId = source.trainingSetId ?? await getReviewSetId(source.id);
-      if (!selectedSetId) throw new NoReviewErrorsError("Nenhum erro para revisar.");
-      selectedSet = await getTrainingSetContext(selectedSetId);
+      const selectedSetId = config.trainingType === null ? undefined : source.trainingSetId ?? await getReviewSetId(source.id);
+      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : null;
       entries = await getReviewEntries(source.id, selectedSetId);
       if (!entries.length) throw new NoReviewErrorsError("Nenhum erro para revisar.");
       config = { ...config, targetQuestions: entries.length };
     } else {
-      const selectedSetId = source.trainingSetId ?? source.exerciseQueue[0]?.trainingSetId;
-      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : await selectEligibleTrainingSet(config);
-      entries = selectedSet ? await getEligibleEntries(config, selectedSet.id) : [];
+      const selectedSetId = config.trainingType === null ? undefined : source.trainingSetId ?? source.exerciseQueue[0]?.trainingSetId;
+      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : config.trainingType === null ? null : await selectEligibleTrainingSet(config);
+      entries = await getEligibleEntries(config, selectedSet?.id);
     }
   } else if ("config" in request) {
     config = request.config;
-    selectedSet = await selectEligibleTrainingSet(config);
-    entries = selectedSet ? await getEligibleEntries(config, selectedSet.id) : [];
+    selectedSet = config.trainingType === null ? null : await selectEligibleTrainingSet(config);
+    entries = await getEligibleEntries(config, selectedSet?.id);
   } else {
     throw new TrainingSessionStateError("Configuração de sessão inválida.");
   }
 
   if (!entries.length) throw new NoExercisesError("Nenhum exercício disponível para estes filtros.");
-  if (!selectedSet) throw new NoExercisesError("O estudo selecionado não está mais disponível.");
+  if (config.trainingType !== null && !selectedSet) throw new NoExercisesError("O estudo selecionado não está mais disponível.");
   const queue = buildExerciseQueue(entries, config.targetQuestions, Math.random, previousQueue);
   const exercise = await getExercise(queue[0]);
   if (!exercise) throw new NoExercisesError("O exercício selecionado não está mais disponível.");
@@ -108,10 +108,10 @@ export async function createTrainingSession(userId: string, request: SessionStar
     await getDb().insert(trainingSessions).values({
       id,
       userId,
-      trainingSetId: selectedSet.id,
+      trainingSetId: selectedSet?.id ?? null,
       trainingType: config.trainingType,
       equityModel: config.equityModel,
-      playersCount: selectedSet.playersCount,
+      playersCount: selectedSet?.playersCount ?? null,
       stackBb: config.stackDepthBb ?? null,
       heroPosition: config.heroPosition ?? null,
       targetQuestions: config.targetQuestions,
@@ -157,7 +157,8 @@ export async function answerTrainingSession(userId: string, input: AnswerTrainin
   let nextPosition = session.queuePosition + 1;
 
   if (!completed && nextPosition >= nextQueue.length) {
-    const eligible = await getEligibleEntries(sessionConfig(session), session.trainingSetId ?? entry.trainingSetId);
+    const continuedConfig = sessionConfig(session);
+    const eligible = await getEligibleEntries(continuedConfig, continuedConfig.trainingType === null ? undefined : session.trainingSetId ?? entry.trainingSetId);
     if (!eligible.length) throw new TrainingSessionStateError("Não há exercícios para continuar o treino livre.");
     nextQueue = buildExerciseQueue(eligible, null);
     if (nextQueue.length > 1 && sameQueueEntry(entry, nextQueue[0])) [nextQueue[0], nextQueue[1]] = [nextQueue[1], nextQueue[0]];
@@ -265,17 +266,21 @@ export async function getTrainingReport(userId: string, sessionId: string): Prom
   if (!session || !session.endedAt || !session.completionReason) throw new TrainingSessionStateError("Relatório indisponível para esta sessão.");
   if (!session.answerDetailsAvailable) return buildLegacyReport(session);
   const answers = await getDb().select({
+    questionIndex: trainingAnswers.questionIndex,
     handClass: trainingAnswers.handClass,
     heroPosition: trainingAnswers.heroPosition,
     selectedAction: trainingAnswers.selectedAction,
     bestAction: trainingAnswers.bestAction,
     isCorrect: trainingAnswers.isCorrect,
     isMixed: trainingAnswers.isMixed,
-  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(desc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
+    strategy: trainingAnswers.strategy,
+    evs: trainingAnswers.evs,
+    evUnit: trainingAnswers.evUnit,
+  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(asc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
   return buildReport(session, answers);
 }
 
-async function selectEligibleTrainingSet(filters: TrainingFilters) {
+async function selectEligibleTrainingSet(filters: TrainingQueryFilters) {
   const [row] = await getDb().select({ id: trainingSets.id, playersCount: trainingSets.playersCount })
     .from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
@@ -292,9 +297,9 @@ async function getTrainingSetContext(trainingSetId: string) {
   return row ?? null;
 }
 
-async function getEligibleEntries(filters: TrainingFilters, trainingSetId: string): Promise<QueueEntry[]> {
+async function getEligibleEntries(filters: TrainingQueryFilters, trainingSetId?: string): Promise<QueueEntry[]> {
   const pivot = crypto.randomUUID();
-  const baseConditions = [eq(trainingSets.id, trainingSetId), ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
+  const baseConditions = [...(trainingSetId ? [eq(trainingSets.id, trainingSetId)] : []), ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
   const queryWindow = (boundary: SQL, limit: number) => getDb().select({
       trainingSetId: trainingSets.id,
       trainingNodeId: trainingNodes.id,
@@ -320,13 +325,13 @@ async function getReviewSetId(sessionId: string) {
   return row?.trainingSetId ?? null;
 }
 
-async function getReviewEntries(sessionId: string, trainingSetId: string): Promise<QueueEntry[]> {
+async function getReviewEntries(sessionId: string, trainingSetId?: string): Promise<QueueEntry[]> {
   const rows = await getDb().select({
     trainingSetId: trainingAnswers.trainingSetId,
     trainingNodeId: trainingAnswers.trainingNodeId,
     trainingHandId: trainingAnswers.trainingHandId,
   }).from(trainingAnswers)
-    .where(and(eq(trainingAnswers.trainingSessionId, sessionId), eq(trainingAnswers.trainingSetId, trainingSetId), eq(trainingAnswers.isCorrect, false)))
+    .where(and(eq(trainingAnswers.trainingSessionId, sessionId), ...(trainingSetId ? [eq(trainingAnswers.trainingSetId, trainingSetId)] : []), eq(trainingAnswers.isCorrect, false)))
     .orderBy(desc(trainingAnswers.answeredAt))
     .limit(MAX_EXERCISE_QUEUE_SIZE);
   return fisherYates(rows);
@@ -514,7 +519,7 @@ function sameConfig(left: TrainingConfig, right: TrainingConfig) {
     && left.targetQuestions === right.targetQuestions;
 }
 
-function buildReport(session: typeof trainingSessions.$inferSelect, answers: Array<{ handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null }>): TrainingReport {
+function buildReport(session: typeof trainingSessions.$inferSelect, answers: Array<{ questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"] }>): TrainingReport {
   const answered = session.answeredQuestions;
   const correct = session.correctAnswers;
   const accuracy = answered ? Math.round(correct / answered * 100) : 0;
@@ -558,6 +563,19 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Arr
     byDecisionType,
     mostMissedHands,
     errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: selectedActionLabel(answer.selectedAction), bestAction: answer.bestAction })),
+    decisionDetails: answers.map((answer) => ({
+      questionIndex: answer.questionIndex,
+      handClass: answer.handClass,
+      heroPosition: answer.heroPosition,
+      selectedAction: selectedActionLabel(answer.selectedAction),
+      selectedKey: actionKey(answer.selectedAction as TrainingAction),
+      bestAction: answer.bestAction,
+      isCorrect: answer.isCorrect,
+      isMixed: Boolean(answer.isMixed),
+      strategy: answer.strategy,
+      evs: answer.evs,
+      evUnit: answer.evUnit,
+    })),
     feedback,
   };
 }
@@ -586,6 +604,7 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     byDecisionType: [],
     mostMissedHands: [],
     errorDetails: [],
+    decisionDetails: [],
     feedback: ["Resumo histórico: detalhes por mão não estavam disponíveis nesta versão."],
   };
 }
@@ -609,11 +628,11 @@ function selectedActionLabel(action: Record<string, unknown>) {
 function elapsedSeconds(startedAt: Date) { return Math.max(0, Math.round((Date.now() - startedAt.getTime()) / 1000)); }
 function eligibleHandCondition() { return sql`COALESCE((${trainingHands.metadata}->>'hrcWeight')::double precision, 1) >= 0.01`; }
 
-function conditions(filters: TrainingFilters, keys: Array<keyof TrainingFilters>) {
+function conditions(filters: TrainingQueryFilters, keys: Array<keyof TrainingFilters>) {
   const result = [...PUBLISHED_CONDITIONS];
   for (const key of keys) {
     const value = filters[key];
-    if (value === undefined || value === "") continue;
+    if (value === undefined || value === null || value === "") continue;
     if (key === "trainingType") result.push(eq(trainingNodes.trainingType, value as TrainingType));
     if (key === "equityModel") result.push(eq(trainingSets.equityModel, value as EquityModel));
     if (key === "stackDepthBb") result.push(eq(trainingNodes.heroStackBb, value as number));

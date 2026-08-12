@@ -1,93 +1,158 @@
-import { actionKey, formatBb, type TrainingAction, type TrainingExercise, type TrainingSequenceAction } from "../../lib/training";
-import { suitColorClass } from "../../lib/poker/cards";
-import { buildTrainingPrompt, normalizeTrainingPosition, sequenceActionLabel, trainingTableSeats } from "./trainingPresentation";
+import type { PokerCard, Rank } from "../../lib/poker/cards";
+import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction } from "../../lib/training";
+import { PlayingCard } from "../play/PlayingCard";
+import { UnifiedActionPanel } from "./UnifiedActionPanel";
+import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
+import { UnifiedResultPanel } from "./UnifiedResultPanel";
+import { buildTrainingPrompt, normalizeTrainingPosition, trainingTableSeats } from "./trainingPresentation";
 
-export function HeroHand({ handClass, compact = false }: { handClass: string; compact?: boolean }) {
-  const cards = handClassCards(handClass);
+export type SpotFeedback = {
+  answer: AnswerEvaluation;
+  selectedKey: string;
+};
+
+export function HeroHand({ handClass, compact = false, animate = false }: { handClass: string; compact?: boolean; animate?: boolean }) {
+  const cards = handClassPokerCards(handClass);
   return <div className={`rl-hero-hand ${compact ? "compact" : ""}`} aria-label={`Sua mão: ${handClass}`}>
-    <PlayingCard rank={cards[0]} suit={cards[1]}/>
-    <PlayingCard rank={cards[2]} suit={cards[3]}/>
+    {cards.map((card, index) => <PlayingCard key={`${card.rank}${card.suit}-${index}`} card={card} compact={compact} animate={animate}/>)}
   </div>;
 }
 
-export function TrainingDecision({ exercise, busy, onChoose }: { exercise: TrainingExercise; busy: boolean; onChoose: (action: TrainingAction) => void }) {
-  return <section className="rl-decision-stage" aria-labelledby="training-question">
-    <PokerArena exercise={exercise}/>
-
-    <div className="rl-question-row">
-      <div className="rl-hand-label"><span>SUA MÃO</span><b>{exercise.handClass}</b></div>
-      <HeroHand handClass={exercise.handClass}/>
-      <div className="rl-question-divider" aria-hidden="true"/>
-      <div className="rl-question-copy">
-        <h1 id="training-question">{buildTrainingPrompt(exercise)}</h1>
-        <p>Escolha antes de ver como o solver joga.</p>
-      </div>
-    </div>
-
-    <div className={`rl-decision-actions actions-${exercise.availableActions.length}`} aria-label="Escolha sua ação">
-      {exercise.availableActions.map((action) => {
-        return <button key={actionKey(action)} disabled={busy} onClick={() => onChoose(action)}>
-          <ActionIcon action={action}/>
-          <span><b>{mainActionLabel(action, exercise)}</b>{typeof action.amountBb === "number" && <small>{formatBb(action.amountBb)} BB</small>}</span>
-        </button>;
-      })}
-    </div>
+export function TrainingDecision({ exercise, busy, feedback, nextLabel = "Próximo spot", onChoose, onRepeat, onNext }: {
+  exercise: TrainingExercise;
+  busy: boolean;
+  feedback?: SpotFeedback | null;
+  nextLabel?: string;
+  onChoose: (action: TrainingAction) => void;
+  onRepeat?: () => void;
+  onNext?: () => void;
+}) {
+  return <section className="spot-training-decision" aria-labelledby="training-question">
+    <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise}/></div>
+    {feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>}
   </section>;
 }
 
-function PokerArena({ exercise }: { exercise: TrainingExercise }) {
-  const seats = trainingTableSeats(exercise.playersCount, exercise.heroPosition);
-  const actions = new Map<string, { action: TrainingSequenceAction; index: number }>();
-  exercise.actionSequence.forEach((action, index) => {
-    if (action.position) actions.set(normalizeTrainingPosition(action.position), { action, index });
-  });
-
-  return <div className={`rl-poker-arena players-${seats.length}`} aria-label={`Mesa de poker com ${exercise.playersCount} jogadores`}>
-    <div className="rl-table-felt">
-      <div className="rl-table-inner-line"/>
-      <div className="rl-board-backs" aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <i key={index}/>)}</div>
-      <div className="rl-table-watermark"><span>R</span> RangeLab</div>
-      {seats.map((seat, index) => {
-        const normalized = normalizeTrainingPosition(seat.position);
-        const hero = normalized === normalizeTrainingPosition(exercise.heroPosition);
-        const sequenceEntry = actions.get(normalized);
-        const folded = sequenceEntry?.action.type === "FOLD";
-        return <div key={seat.position} data-hero={hero || undefined} data-folded={folded || undefined} className={`rl-table-seat position-${seat.placement}`}>
-          {seat.dealer && <i className="rl-dealer-chip">D</i>}
-          <b>{seat.label}</b>
-          <span>{hero ? `${formatBb(exercise.heroStackBb)} BB` : sequenceEntry ? sequenceActionLabel(sequenceEntry.action, sequenceEntry.index, exercise.actionSequence) : `${formatBb(exercise.heroStackBb)} BB`}</span>
-          {hero && <small>VOCÊ</small>}
-          {!hero && !sequenceEntry && index >= seats.length - 2 && <small>AGUARDA</small>}
-        </div>;
-      })}
-    </div>
+export function TrainingTablePreview() {
+  const seats = trainingTableSeats(8, "UTG").map<UnifiedTableSeat>((seat) => ({
+    position: seat.label,
+    positionKey: seat.position,
+    stackBb: 40,
+    dealer: seat.dealer,
+  }));
+  return <div className="unified-table-preview">
+    <UnifiedPokerTable seats={seats} anchorPosition="UTG" phase="DEALING" showDeck showChips={false} showSeatDetails={false} ariaLabel="Prévia da mesa de treinamento"/>
   </div>;
 }
 
-function ActionIcon({ action }: { action: TrainingAction }) {
-  const isDown = action.type === "FOLD";
-  const isCheck = action.type === "CHECK";
-  return <i className="rl-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    {isCheck ? <path d="m6 12 4 4 8-9"/> : <><path d={isDown ? "M12 5v14M7 14l5 5 5-5" : "M12 19V5M7 10l5-5 5 5"}/></>}
-  </svg></i>;
+function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
+  const actionHistory = new Map<string, TrainingSequenceAction>();
+  exercise.actionSequence.forEach((action) => {
+    if (action.position) actionHistory.set(normalizeTrainingPosition(action.position), action);
+  });
+  const heroPosition = normalizeTrainingPosition(exercise.heroPosition);
+  const seats = trainingTableSeats(exercise.playersCount, exercise.heroPosition).map<UnifiedTableSeat>((seat) => {
+    const normalized = normalizeTrainingPosition(seat.position);
+    const hero = normalized === heroPosition;
+    const sequenceEntry = actionHistory.get(normalized);
+    return {
+      position: seat.label,
+      positionKey: seat.position,
+      stackBb: exercise.heroStackBb,
+      cards: hero ? handClassPokerCards(exercise.handClass) : [],
+      cardsVisible: hero,
+      visibleCards: hero ? 2 : 0,
+      hero,
+      active: hero,
+      folded: sequenceEntry?.type === "FOLD",
+      dealer: seat.dealer,
+    };
+  });
+  return <UnifiedPokerTable
+    seats={seats}
+    anchorPosition={exercise.heroPosition}
+    phase="PLAYING"
+    showChips={false}
+    showSeatDetails={false}
+    className="spot-poker-table"
+    ariaLabel={`Mesa do spot com ${exercise.playersCount} jogadores`}
+  />;
 }
 
-function PlayingCard({ rank, suit }: { rank: string; suit: string }) {
-  return <div className={`rl-playing-card ${suitColorClass(suit)}`}><span>{rank}</span><b>{suit}</b></div>;
+function SpotActionPanel({ exercise, busy, onChoose }: { exercise: TrainingExercise; busy: boolean; onChoose: (action: TrainingAction) => void }) {
+  return <UnifiedActionPanel
+    eyebrow="SUA VEZ"
+    title={buildTrainingPrompt(exercise)}
+    context="Escolha a ação que você faria."
+    titleId="training-question"
+    busy={busy}
+    className="spot-action-panel"
+    actions={exercise.availableActions.map((action) => ({
+      id: actionKey(action),
+      label: actionResultLabel(action, exercise),
+      tone: actionTone(action, exercise),
+    }))}
+    onAction={(selectedKey) => {
+      const selected = exercise.availableActions.find((action) => actionKey(action) === selectedKey);
+      if (selected) onChoose(selected);
+    }}
+  />;
 }
 
-function handClassCards(handClass: string): [string, string, string, string] {
+function SpotResult({ exercise, feedback, nextLabel, onRepeat, onNext }: { exercise: TrainingExercise; feedback: SpotFeedback; nextLabel: string; onRepeat?: () => void; onNext?: () => void }) {
+  const { answer } = feedback;
+  const selectedAction = exercise.availableActions.find((action) => actionAliases(action).includes(feedback.selectedKey));
+  const bestAction = exercise.availableActions.find((action) => actionAliases(action).includes(answer.bestKey));
+  const selectedLabel = selectedAction ? actionResultLabel(selectedAction, exercise) : feedback.selectedKey;
+  const bestLabel = bestAction ? actionResultLabel(bestAction, exercise) : answer.bestLabel;
+  const summary = answer.correct
+    ? answer.isMixed ? `${selectedLabel} faz parte da estratégia mista deste spot.` : `Você escolheu ${selectedLabel}. Boa decisão.`
+    : `Você escolheu ${selectedLabel}. A ação de referência é ${bestLabel}.`;
+  return <UnifiedResultPanel
+    score={answer.correct ? 100 : 0}
+    eyebrow="RESULTADO DO SPOT"
+    title={answer.correct ? "DECISÃO CORRETA" : "REVISAR DECISÃO"}
+    description={summary}
+    reviews={[
+      { id: "preflop", status: answer.correct ? "CORRECT" : "REVIEW", label: "Pré-flop" },
+      { id: "best", status: "NOT_PLAYED", label: "Melhor ação", value: bestLabel },
+    ]}
+    repeatLabel="Repetir spot"
+    nextLabel={nextLabel}
+    tone={answer.correct ? "correct" : "review"}
+    className="spot-result"
+    titleId="spot-result-title"
+    onRepeat={() => onRepeat?.()}
+    onNext={() => onNext?.()}
+  />;
+}
+
+function handClassPokerCards(handClass: string): [PokerCard, PokerCard] {
   const clean = handClass.trim().toUpperCase();
-  if (clean.length === 2) return [clean[0], "♠", clean[1], "♥"];
-  return [clean[0], "♠", clean[1], clean.endsWith("S") ? "♠" : "♥"];
+  const firstRank = clean[0] as Rank;
+  const secondRank = clean[1] as Rank;
+  return [
+    { rank: firstRank, suit: "s" },
+    { rank: secondRank, suit: clean.length > 2 && clean.endsWith("S") ? "s" : "h" },
+  ];
 }
 
 function mainActionLabel(action: TrainingAction, exercise: TrainingExercise) {
   if (action.type === "FOLD") return "Fold";
   if (action.type === "CHECK") return "Check";
   if (action.type === "CALL") return "Call";
-  if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - 0.01) return "All-in";
+  if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - .01) return "All-in";
   if (exercise.trainingType === "OPEN_FOLD") return "Open";
   if (exercise.trainingType === "VS_OPEN") return "3-bet";
   return action.type === "BET" ? "Bet" : "Raise";
+}
+
+function actionResultLabel(action: TrainingAction, exercise: TrainingExercise) {
+  const label = mainActionLabel(action, exercise);
+  return typeof action.amountBb === "number" ? `${label} ${formatBb(action.amountBb)} BB` : label;
+}
+
+function actionTone(action: TrainingAction, exercise: TrainingExercise) {
+  if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - .01) return "all_in";
+  return action.type.toLowerCase();
 }

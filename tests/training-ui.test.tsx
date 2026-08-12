@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProgressExperience from "../app/progresso/progress-experience";
@@ -53,7 +54,7 @@ test("renderiza grades de 2, 3 e 4 ações sem assumir uma combinação fixa", (
 
   for (const actions of actionSets) {
     const markup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, actions)} busy={false} onChoose={() => undefined}/>);
-    assert.match(markup, new RegExp(`rl-decision-actions actions-${actions.length}`));
+    assert.match(markup, new RegExp(`play-action-buttons actions-${actions.length}`));
     assert.equal((markup.match(/<button/g) ?? []).length, actions.length);
   }
 });
@@ -62,9 +63,25 @@ test("renderiza a quantidade correta de seats em heads-up, 6-max e 9-max", () =>
   for (const playersCount of [2, 6, 9]) {
     const heroPosition = positionNames(playersCount).at(-1)!;
     const markup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(playersCount, [fold, allIn], heroPosition)} busy={false} onChoose={() => undefined}/>);
-    assert.match(markup, new RegExp(`rl-poker-arena players-${playersCount}`));
-    assert.equal((markup.match(/rl-table-seat/g) ?? []).length, playersCount);
+    assert.match(markup, new RegExp(`data-seat-count="${playersCount}"`));
+    assert.equal((markup.match(/data-position=/g) ?? []).length, playersCount);
+    assert.match(markup, /style="--table-seat-x:50%;--table-seat-y:100%" class="play-seat play-seat-1 play-seat--hero/);
   }
+});
+
+test("mesa de spot gira qualquer posição do Hero para o centro inferior com as cartas ao lado", () => {
+  const positions = positionNames(9);
+  for (const heroPosition of ["UTG", "CO", "BTN", "BB"]) {
+    const exercise = makeExercise(9, [fold, call], heroPosition);
+    exercise.handClass = "A6s";
+    const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+    const heroSeat = markup.match(new RegExp(`<div style="--table-seat-x:50%;--table-seat-y:100%" class="play-seat play-seat-1 play-seat--hero[^>]*data-position="${heroPosition}"[\\s\\S]*?<div class="play-player-box">`))?.[0] ?? "";
+    assert.match(heroSeat, new RegExp(`data-position="${heroPosition}"`));
+    assert.match(heroSeat, /play-hole-cards/);
+    assert.match(heroSeat, /play-card-rank">A</);
+    assert.match(heroSeat, /play-card-rank">6</);
+  }
+  assert.equal(positions.length, 9);
 });
 
 test("sinaliza limites de memória sem rotular a amostra como histórico completo", () => {
@@ -105,10 +122,74 @@ test("relatório diferencia totais completos de detalhes recentes limitados", ()
     byDecisionType: [],
     mostMissedHands: [],
     errorDetails: [],
+    decisionDetails: [],
     feedback: [],
   }} onExit={() => undefined} onStarted={() => undefined}/>);
   assert.match(markup, /Os totais cobrem a sessão completa/);
   assert.match(markup, /Revisar erros recentes \(até 100\)/);
+});
+
+test("drill avança sem revelar a solução e concentra a análise no relatório", async () => {
+  const trainerSource = await readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(trainerSource, /import \{ TrainingFeedback \}/);
+  assert.match(trainerSource, /setFeedback\(\{ answer: data\.answer/);
+  assert.match(trainerSource, /setExercise\(feedback\.nextExercise\)/);
+  assert.match(trainerSource, /ANÁLISE COMPLETA DA SESSÃO/);
+
+  const decisionMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} onChoose={() => undefined}/>);
+  assert.match(decisionMarkup, /unified-training-table/);
+  assert.match(decisionMarkup, /play-hole-cards/);
+  assert.match(decisionMarkup, /play-card--dealt/);
+  assert.match(decisionMarkup, /play-action-panel play-action-panel--hero/);
+  assert.doesNotMatch(decisionMarkup, /play-chip-display|play-pot|play-bet-zone/);
+  assert.doesNotMatch(decisionMarkup, /rl-training-sidebar/);
+  assert.doesNotMatch(decisionMarkup, /RESULTADO DO SPOT/);
+  assert.doesNotMatch(decisionMarkup, /FREQUÊNCIA DO SOLVER/);
+
+  const feedbackMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} feedback={{ answer: { correct: false, selectedKey: "fold", bestKey: "call", bestLabel: "Call", strategy: { fold: 0, call: 1 }, evs: { fold: 0, call: 1 }, decisionClarity: 1, isMixed: false }, selectedKey: "fold" }} onChoose={() => undefined} onRepeat={() => undefined} onNext={() => undefined}/>);
+  assert.match(feedbackMarkup, /RESULTADO DO SPOT/);
+  assert.match(feedbackMarkup, /REVISAR DECISÃO/);
+  assert.match(feedbackMarkup, /Repetir spot/);
+  assert.match(feedbackMarkup, /Próximo spot/);
+});
+
+test("spots e mão completa usam os mesmos componentes visuais", async () => {
+  const [spot, table, action, result] = await Promise.all([
+    readFile(new URL("../components/training/TrainingDecision.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/play/PokerTable.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/play/ActionPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/play/HandResult.tsx", import.meta.url), "utf8"),
+  ]);
+  for (const shared of ["UnifiedPokerTable", "UnifiedActionPanel", "UnifiedResultPanel"]) assert.match(spot, new RegExp(shared));
+  assert.match(table, /UnifiedPokerTable/);
+  assert.match(action, /UnifiedActionPanel/);
+  assert.match(result, /UnifiedResultPanel/);
+  assert.doesNotMatch(spot, /<div className="play-table-rail"|<div className="play-player-box"/);
+});
+
+test("navegação reúne drills e mão completa em treinar", async () => {
+  const [header, legacyPlay, workspace, trainer, playTrainer] = await Promise.all([
+    readFile(new URL("../app/member-header.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/jogar/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/treinar/training-workspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/play/PlayTrainer.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(header, /href="\/treinar">Treinar/);
+  assert.match(legacyPlay, /\/treinar\?modo=mao-completa/);
+  assert.match(workspace, /mão completa/i);
+  assert.doesNotMatch(workspace, /Novo drill|ÁREA DE TREINO/);
+  assert.doesNotMatch(workspace, /if \(session\) return <DatabaseTrainer/);
+  assert.match(workspace, /session \? <DatabaseTrainer/);
+  assert.match(workspace, /<PlayTrainer scenarios=\{fullHandScenarios\}\/>/);
+  assert.doesNotMatch(playTrainer, /router\.(push|replace)|window\.location|rangelab-play-lock/);
+  assert.match(playTrainer, /scenarios\?: readonly PlayableHandScenario\[\]/);
+  assert.match(trainer, /className="inline-training-session"/);
+  assert.doesNotMatch(trainer, /training-screen training-screen-redesigned/);
+  for (const label of ["Solutions", "Starting spot", "Preflop action", "All settings", "Start training"]) assert.match(trainer, new RegExp(label));
+  assert.match(trainer, /options\.trainingTypes\.length > 0/);
+  assert.match(trainer, /trainingType: filters\.trainingType \?\? null/);
+  assert.match(trainer, /Todos os spots/);
 });
 
 function makeExercise(playersCount: number, availableActions: TrainingAction[], heroPosition = "BB"): TrainingExercise {

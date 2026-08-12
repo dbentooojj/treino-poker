@@ -2,23 +2,18 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { TrainingDecision } from "../components/training/TrainingDecision";
-import { TrainingFeedback } from "../components/training/TrainingFeedback";
-import { TrainingStats } from "../components/training/TrainingStats";
-import { TrainingTable } from "../components/training/TrainingTable";
-import type { AuthUser } from "../db/auth";
-import MemberHeader from "./member-header";
 import {
   EQUITY_MODELS,
   QUESTION_COUNTS,
   TRAINING_TYPES,
   actionKey,
   equityModelLabels,
+  evaluateChoice,
   formatBb,
   trainingTypeDescriptions,
   trainingTypeLabels,
-  type AnswerEvaluation,
-  type NodeRange,
   type TrainingAction,
+  type AnswerEvaluation,
   type TrainingConfig,
   type TrainingExercise,
   type TrainingFilters,
@@ -30,9 +25,16 @@ import {
 
 const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false };
 
-export function TrainingSetup({ preferredType, onClose, onStarted }: { preferredType?: TrainingType; onClose: () => void; onStarted: (session: TrainingSession) => void }) {
-  const [filters, setFilters] = useState<TrainingFilters>({ trainingType: preferredType });
-  const [targetQuestions, setTargetQuestions] = useState<TrainingConfig["targetQuestions"]>(50);
+type PendingSpotFeedback = {
+  answer: AnswerEvaluation;
+  selectedKey: string;
+  nextExercise: TrainingExercise | null;
+  report: TrainingReport | null;
+};
+
+export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, onClose, onStarted, onFullHand, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; onClose?: () => void; onStarted: (session: TrainingSession) => void; onFullHand?: () => void; embedded?: boolean }) {
+  const [filters, setFilters] = useState<TrainingFilters>(initialFilters ?? { trainingType: preferredType });
+  const [targetQuestions, setTargetQuestions] = useState<TrainingConfig["targetQuestions"]>(initialTargetQuestions);
   const [options, setOptions] = useState(EMPTY_OPTIONS);
   const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -82,10 +84,10 @@ export function TrainingSetup({ preferredType, onClose, onStarted }: { preferred
     }
   }
 
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="setup-card training-setup-card simplified-setup" role="dialog" aria-modal="true" aria-labelledby="setup-title">
-      <button className="close-button" aria-label="Fechar" onClick={onClose}>×</button>
+  const panel = <section className={`setup-card training-setup-card simplified-setup ${embedded ? "training-setup-embedded" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="setup-title">
+      {!embedded && <button className="close-button" aria-label="Fechar" onClick={onClose}>×</button>}
       <div className="setup-heading"><span>CONFIGURAÇÃO DO TREINO</span><h2 id="setup-title">Prepare sua sessão</h2><p>Escolha o foco e o modelo. Os estudos publicados definem as mãos disponíveis.</p></div>
+      {onFullHand && <div className="setup-experience-switch"><label>Modo de treino</label><div><button type="button" className="selected">Drill de spots</button><button type="button" onClick={onFullHand}>Mão completa <small>BETA</small></button></div></div>}
       <div className="setup-group"><label>Tipo de treinamento</label><div className="training-type-grid">{TRAINING_TYPES.map((type) => {
         const available = options.trainingTypes.includes(type);
         return <button key={type} type="button" disabled={!available || loading} className={filters.trainingType === type ? "selected" : ""} onClick={() => setFilters({ trainingType: type })}>
@@ -103,20 +105,126 @@ export function TrainingSetup({ preferredType, onClose, onStarted }: { preferred
         </div>
       </>}
       {error && <div className="setup-error" role="alert">{error}</div>}
-      <button className="start-button" disabled={!config || loading || starting} onClick={start}>{starting ? "Montando a fila…" : "Começar treino"}<span>{starting ? "" : "→"}</span></button>
-    </section>
-  </div>;
+      <button className="start-button" disabled={!config || loading || starting} onClick={start}>{starting ? "Montando a fila…" : "Começar treinamento"}<span>{starting ? "" : "▶"}</span></button>
+    </section>;
+  if (embedded) return panel;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose?.(); }}>{panel}</div>;
 }
 
-export function DatabaseTrainer({ session, user, onExit, onStarted }: { session: TrainingSession; user: AuthUser; onExit: () => void; onStarted: (session: TrainingSession) => void }) {
+const QUICK_PREFLOP_ACTIONS: Array<{ label: string; type?: TrainingType }> = [
+  { label: "Any" },
+  { label: "RFI", type: "OPEN_FOLD" },
+  { label: "vs Open", type: "VS_OPEN" },
+  { label: "vs 3bet" },
+  { label: "Push / Fold", type: "PUSH_FOLD" },
+  { label: "vs Shove", type: "CALL_VS_SHOVE" },
+  { label: "vs 4bet" },
+  { label: "From start" },
+];
+
+export function TrainingQuickSetup({ onStarted, onFullHand }: { onStarted: (session: TrainingSession) => void; onFullHand: () => void }) {
+  const [filters, setFilters] = useState<TrainingFilters>({});
+  const [options, setOptions] = useState(EMPTY_OPTIONS);
+  const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [error, setError] = useState("");
+  const targetQuestions: TrainingConfig["targetQuestions"] = 50;
+  const filterQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== "") params.set(key, String(value));
+    return params.toString();
+  }, [filters]);
+  const loading = loadedQuery !== filterQuery;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/training/options?${filterQuery}`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as TrainingOptions & { error?: string };
+        if (!response.ok) throw new Error(data.error || "Não foi possível carregar os estudos.");
+        setOptions(data);
+        setFilters((current) => {
+          const normalized = normalizeFilters(current, data);
+          return { ...normalized, equityModel: normalized.equityModel ?? data.equityModels[0] };
+        });
+        setError("");
+      })
+      .catch((requestError: unknown) => {
+        if (requestError instanceof DOMException && requestError.name === "AbortError") return;
+        setOptions(EMPTY_OPTIONS);
+        setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar os estudos.");
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoadedQuery(filterQuery); });
+    return () => controller.abort();
+  }, [filterQuery]);
+
+  const config = buildConfig(filters, targetQuestions, options.hasMatches, true);
+  const modelLabel = filters.equityModel ? equityModelLabels[filters.equityModel] : "Selecionar";
+
+  function cycleModel() {
+    if (options.equityModels.length < 2) return;
+    const currentIndex = filters.equityModel ? options.equityModels.indexOf(filters.equityModel) : -1;
+    const nextModel = options.equityModels[(currentIndex + 1) % options.equityModels.length];
+    setFilters((current) => ({ trainingType: current.trainingType, equityModel: nextModel }));
+  }
+
+  async function start() {
+    if (!config || starting) return;
+    setStarting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/training/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "START", config }) });
+      const data = await response.json() as TrainingSession & { error?: string };
+      if (!response.ok) throw new Error(data.error || "Não foi possível iniciar o treinamento.");
+      onStarted(data);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível iniciar o treinamento.");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  return <>
+    <section className="training-quick-setup" aria-label="Configuração rápida do treino">
+      <div className="quick-setup-group quick-solution">
+        <label>Solutions</label>
+        <div><button type="button" onClick={cycleModel} aria-label={`Solução MTT ${modelLabel}`}>MTT <i/>{modelLabel}</button><button type="button" className="quick-settings-icon" aria-label="Abrir todos os ajustes" onClick={() => setAdvancedOpen(true)}>⚙</button></div>
+      </div>
+      <div className="quick-setup-group quick-starting-spot">
+        <label>Starting spot <small title="Street em que o drill começa">?</small></label>
+        <div><button type="button" className="selected">Preflop</button><button type="button" disabled title="Disponível quando houver estudos pós-flop">Flop</button><button type="button" disabled title="Disponível quando houver estudos customizados">Custom</button></div>
+      </div>
+      <div className="quick-setup-group quick-preflop-action">
+        <label>Preflop action <small title="Situação enfrentada pelo Hero">?</small></label>
+        <div>{QUICK_PREFLOP_ACTIONS.map((item) => {
+          const isAny = item.label === "Any";
+          const available = isAny ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
+          const selected = isAny ? available && !filters.trainingType : item.type === filters.trainingType;
+          return <button type="button" key={item.label} disabled={!available || loading} title={available ? undefined : item.type ? "Nenhum estudo publicado para esta categoria" : "Em breve"} className={selected ? "selected" : ""} onClick={() => {
+            if (isAny) setFilters((current) => ({ equityModel: current.equityModel }));
+            else if (item.type) setFilters((current) => ({ trainingType: item.type, equityModel: current.equityModel }));
+          }}>{item.label}</button>;
+        })}</div>
+      </div>
+      {error && <div className="setup-error quick-setup-error" role="alert">{error}</div>}
+      <div className="quick-setup-actions"><button type="button" className="quick-all-settings" onClick={() => setAdvancedOpen(true)}><span>⚙</span> All settings</button><button type="button" className="quick-start-training" disabled={!config || loading || starting} onClick={start}><span>▶</span>{starting ? "Preparando…" : "Start training"}</button></div>
+    </section>
+    {advancedOpen && <TrainingSetup
+      initialFilters={filters}
+      initialTargetQuestions={targetQuestions}
+      onClose={() => setAdvancedOpen(false)}
+      onFullHand={() => { setAdvancedOpen(false); onFullHand(); }}
+      onStarted={(session) => { setAdvancedOpen(false); onStarted(session); }}
+    />}
+  </>;
+}
+
+export function DatabaseTrainer({ session, onReport }: { session: TrainingSession; onReport: (report: TrainingReport) => void }) {
   const [exercise, setExercise] = useState(session.exercise);
-  const [stats, setStats] = useState({ answered: session.answeredQuestions, correct: session.correctAnswers });
-  const [choice, setChoice] = useState<TrainingAction | null>(null);
-  const [answer, setAnswer] = useState<AnswerEvaluation | null>(null);
-  const [nodeRange, setNodeRange] = useState<NodeRange | null>(null);
-  const [nextExercise, setNextExercise] = useState<TrainingExercise | null>(null);
-  const [pendingReport, setPendingReport] = useState<TrainingReport | null>(null);
-  const [report, setReport] = useState<TrainingReport | null>(null);
+  const [answeredQuestions, setAnsweredQuestions] = useState(session.answeredQuestions);
+  const [feedback, setFeedback] = useState<PendingSpotFeedback | null>(null);
+  const [retryContext, setRetryContext] = useState<PendingSpotFeedback | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(() => Math.max(0, Math.round((Date.now() - session.startedAt) / 1000)));
@@ -126,35 +234,39 @@ export function DatabaseTrainer({ session, user, onExit, onStarted }: { session:
     return () => window.clearInterval(timer);
   }, [session.startedAt]);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    const body = document.body;
-    const shouldLock = report === null;
-    root.classList.toggle("rangelab-training-lock", shouldLock);
-    body.classList.toggle("rangelab-training-lock", shouldLock);
-    return () => {
-      root.classList.remove("rangelab-training-lock");
-      body.classList.remove("rangelab-training-lock");
-    };
-  }, [report]);
-
-  if (report) return <TrainingReportView report={report} onExit={onExit} onStarted={onStarted}/>;
-
   async function choose(selected: TrainingAction) {
-    if (choice || busy) return;
+    if (busy || feedback) return;
+    if (retryContext) {
+      const retry = evaluateChoice(actionKey(selected), exercise.availableActions, retryContext.answer.bestKey, retryContext.answer.evs, retryContext.answer.strategy);
+      if (!retry) {
+        setError("Esta ação não está disponível neste spot.");
+        return;
+      }
+      setFeedback({
+        ...retryContext,
+        selectedKey: retry.selectedKey,
+        answer: {
+          ...retryContext.answer,
+          correct: retry.correct,
+          selectedKey: retry.selectedKey,
+          bestKey: retry.bestKey,
+          bestLabel: retry.bestLabel,
+        },
+      });
+      setRetryContext(null);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/api/training/session", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "ANSWER", sessionId: session.id, questionIndex: stats.answered, trainingNodeId: exercise.trainingNodeId, trainingHandId: exercise.trainingHandId, selectedAction: actionKey(selected) }) });
-      const data = await response.json() as { answer: AnswerEvaluation; nodeRange?: NodeRange; answeredQuestions: number; correctAnswers: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
+      const response = await fetch("/api/training/session", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "ANSWER", sessionId: session.id, questionIndex: answeredQuestions, trainingNodeId: exercise.trainingNodeId, trainingHandId: exercise.trainingHandId, selectedAction: actionKey(selected) }) });
+      const data = await response.json() as { answer: AnswerEvaluation; answeredQuestions: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
       if (!response.ok) throw new Error(data.error || "Não foi possível salvar a resposta.");
-      if (!data.nodeRange || data.nodeRange.trainingSetId !== exercise.trainingSetId || data.nodeRange.trainingNodeId !== exercise.trainingNodeId) throw new Error("Não foi possível carregar o range desta decisão.");
-      setChoice(selected);
-      setAnswer(data.answer);
-      setNodeRange(data.nodeRange);
-      setStats({ answered: data.answeredQuestions, correct: data.correctAnswers });
-      setNextExercise(data.nextExercise);
-      setPendingReport(data.report);
+      setAnsweredQuestions(data.answeredQuestions);
+      if (!data.answer || (!data.report && !data.nextExercise)) {
+        throw new Error("Não foi possível carregar o próximo spot.");
+      }
+      setFeedback({ answer: data.answer, selectedKey: actionKey(selected), nextExercise: data.nextExercise, report: data.report });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível salvar a resposta.");
     } finally {
@@ -162,25 +274,39 @@ export function DatabaseTrainer({ session, user, onExit, onStarted }: { session:
     }
   }
 
-  function advance() {
-    if (pendingReport) { setReport(pendingReport); return; }
-    if (!nextExercise) return;
-    setExercise(nextExercise);
-    setChoice(null);
-    setAnswer(null);
-    setNodeRange(null);
-    setNextExercise(null);
+  function repeatSpot() {
+    if (!feedback) return;
+    setRetryContext(feedback);
+    setFeedback(null);
+    setError("");
+  }
+
+  function advanceSpot() {
+    if (!feedback) return;
+    if (feedback.report) {
+      onReport(feedback.report);
+      return;
+    }
+    if (!feedback.nextExercise) return;
+    setExercise(feedback.nextExercise);
+    setFeedback(null);
+    setRetryContext(null);
+    setError("");
   }
 
   async function finish() {
     if (busy) return;
+    if (feedback?.report) {
+      onReport(feedback.report);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const response = await fetch("/api/training/session", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "FINISH", sessionId: session.id }) });
       const data = await response.json() as { report: TrainingReport; error?: string };
       if (!response.ok) throw new Error(data.error || "Não foi possível finalizar o treino.");
-      setReport(data.report);
+      onReport(data.report);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível finalizar o treino.");
     } finally {
@@ -188,26 +314,26 @@ export function DatabaseTrainer({ session, user, onExit, onStarted }: { session:
     }
   }
 
-  const accuracy = stats.answered ? Math.round(stats.correct / stats.answered * 100) : null;
-  const currentHand = stats.answered + (answer ? 0 : 1);
+  const currentHand = feedback || retryContext ? answeredQuestions : answeredQuestions + 1;
   const progress = session.targetQuestions ? `${Math.min(currentHand, session.targetQuestions)} / ${session.targetQuestions}` : `${currentHand}`;
-  return <main className={`training-screen training-screen-redesigned ${answer ? "feedback-active" : ""}`}>
-    <MemberHeader user={user}/>
-    <header className="rl-trainer-topbar">
-    <div className="rl-header-context">
-      <div><span>MODELO</span><b>{equityModelLabels[exercise.equityModel]}</b></div>
-    </div>
-    <TrainingStats progress={progress} accuracy={accuracy} elapsed={formatDuration(elapsed)}/>
-    <button className="rl-finish-training" disabled={busy} onClick={finish}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V4m0 1h9l3 3-3 3H6"/></svg>Finalizar treino</button>
-  </header>
-    <section className="rl-training-shell">
-      <div className={`rl-training-layout ${answer ? "learning-mode" : "decision-mode"}`}>
-        {!answer && <TrainingTable exercise={exercise} showHistory/>}
-        {!answer ? <TrainingDecision exercise={exercise} busy={busy} onChoose={choose}/> : choice && nodeRange ? <TrainingFeedback exercise={exercise} answer={answer} choiceKey={actionKey(choice)} range={nodeRange} isLast={Boolean(pendingReport)} onNext={advance}/> : null}
-      </div>
-      {error && <div className="setup-error trainer-error" role="alert">{error}</div>}
-    </section>
-  </main>;
+  return <section className="inline-training-session" aria-label="Sessão de treinamento">
+    <header className="spot-session-toolbar">
+      <div><span>Modelo</span><b>{equityModelLabels[exercise.equityModel]}</b></div>
+      <div><span>Mãos</span><b>{progress}</b></div>
+      <div><span>Tempo</span><b>{formatDuration(elapsed)}</b></div>
+      <button type="button" disabled={busy} onClick={finish}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V4m0 1h9l3 3-3 3H6"/></svg>Finalizar treino</button>
+    </header>
+    <TrainingDecision
+      exercise={exercise}
+      busy={busy}
+      feedback={feedback}
+      nextLabel={feedback?.report ? "Ver análise final" : "Próximo spot"}
+      onChoose={choose}
+      onRepeat={repeatSpot}
+      onNext={advanceSpot}
+    />
+    {error && <div className="setup-error trainer-error" role="alert">{error}</div>}
+  </section>;
 }
 
 export function TrainingReportView({ report, onExit, onStarted }: { report: TrainingReport; onExit: () => void; onStarted: (session: TrainingSession) => void }) {
@@ -227,8 +353,8 @@ export function TrainingReportView({ report, onExit, onStarted }: { report: Trai
       setStarting(null);
     }
   }
-  return <main className="training-screen report-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={onExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>RESULTADO</span><b>{report.completionReason === "COMPLETED" ? "Treino concluído" : "Treino finalizado"}</b></div><button className="exit-button" onClick={onExit}>Voltar ao início</button></header>
-    <section className="training-report"><div className="report-hero"><span>{report.completionReason === "COMPLETED" ? "TREINO CONCLUÍDO" : "SESSÃO FINALIZADA"}</span><h1>{report.correctAnswers} / {report.answeredQuestions} corretas</h1><p>{report.accuracy}% de acerto · {formatDuration(report.durationSeconds)}</p><div><i>{trainingTypeLabels[report.trainingType]}</i><i>{equityModelLabels[report.equityModel]}</i><i>{report.stackDepthBb === null ? "Stack: Todas" : `Stack: ${formatBb(report.stackDepthBb)} BB`}</i><i>{report.heroPosition === null ? "Posição: Todas" : `Posição: ${report.heroPosition}`}</i></div></div>
+  return <main className="training-screen report-screen"><header className="trainer-topbar"><button className="brand brand-button" onClick={onExit}><span className="brand-mark">R</span><span>Range<span>Lab</span></span></button><div className="spot-context"><span>ANÁLISE FINAL</span><b>{report.completionReason === "COMPLETED" ? "Treino concluído" : "Treino finalizado"}</b></div><button className="exit-button" onClick={onExit}>Voltar aos treinos</button></header>
+    <section className="training-report"><div className="report-hero"><span>ANÁLISE COMPLETA DA SESSÃO</span><h1>{report.correctAnswers} / {report.answeredQuestions} corretas</h1><p>{report.accuracy}% de acerto · {formatDuration(report.durationSeconds)}</p><div><i>{report.trainingType === null ? "Todos os spots" : trainingTypeLabels[report.trainingType]}</i><i>{equityModelLabels[report.equityModel]}</i><i>{report.stackDepthBb === null ? "Stack: Todas" : `Stack: ${formatBb(report.stackDepthBb)} BB`}</i><i>{report.heroPosition === null ? "Posição: Todas" : `Posição: ${report.heroPosition}`}</i></div></div>
       {report.detailsTruncated && <p className="progress-footnote" role="status">Os totais cobrem a sessão completa; os agrupamentos e erros abaixo usam somente as {report.detailAnswers} respostas mais recentes.</p>}
       <div className="report-stat-grid"><article><span>Respondidas</span><b>{report.answeredQuestions}</b></article><article><span>Acertos</span><b className="green-text">{report.correctAnswers}</b></article><article><span>Erros</span><b className="red-text">{report.errors}</b></article><article><span>Média por resposta</span><b>{report.averageSeconds === null ? "—" : `${report.averageSeconds}s`}</b></article></div>
       <div className="report-grid">
@@ -236,7 +362,7 @@ export function TrainingReportView({ report, onExit, onStarted }: { report: Trai
         {report.mostMissedHands.length > 0 && <ReportSection title="Mãos com mais erros"><div className="missed-hands">{report.mostMissedHands.map((hand) => <div key={hand.handClass}><b>{hand.handClass}</b><span>{hand.errors} erro{hand.errors > 1 ? "s" : ""}</span></div>)}</div></ReportSection>}
         {report.byDecisionType.length > 0 && <ReportSection title="Clareza da decisão"><div className="decision-groups">{report.byDecisionType.map((group) => <div key={group.label}><span>{group.label}</span><b>{group.accuracy}%</b><small>{group.answered} respostas</small></div>)}</div></ReportSection>}
         {report.feedback.length > 0 && <ReportSection title="Feedback objetivo"><ul className="report-feedback">{report.feedback.map((item) => <li key={item}>{item}</li>)}</ul></ReportSection>}
-        {report.errorDetails.length > 0 && <ReportSection title="Erros da sessão"><div className="error-review-list">{report.errorDetails.map((item, index) => <div key={`${item.handClass}-${item.heroPosition}-${index}`}><b>{item.handClass}</b><span>{item.heroPosition}</span><small>{item.selectedAction} → {item.bestAction}</small></div>)}</div></ReportSection>}
+        {report.decisionDetails.length > 0 && <ReportSection title="Revisão de todas as decisões" wide><div className="report-decision-list">{report.decisionDetails.map((detail) => <DecisionReview key={detail.questionIndex} detail={detail}/>)}</div></ReportSection>}
       </div>
       {error && <div className="setup-error" role="alert">{error}</div>}
       <div className="report-actions"><button disabled={starting !== null} onClick={() => start("REPEAT")}>{starting === "REPEAT" ? "Preparando…" : "Treinar novamente"}</button>{report.detailsAvailable && report.errors > 0 ? <button className="primary" disabled={starting !== null} onClick={() => start("REVIEW_ERRORS")}>{starting === "REVIEW_ERRORS" ? "Preparando…" : "Revisar erros recentes (até 100)"}</button> : report.errors === 0 ? <span>Nenhum erro para revisar.</span> : <span>Revisão por mão indisponível para este resumo histórico.</span>}</div>
@@ -244,7 +370,51 @@ export function TrainingReportView({ report, onExit, onStarted }: { report: Trai
   </main>;
 }
 
-function ReportSection({ title, children }: { title: string; children: React.ReactNode }) { return <article className="report-section"><h2>{title}</h2>{children}</article>; }
+function ReportSection({ title, children, wide = false }: { title: string; children: React.ReactNode; wide?: boolean }) { return <article className={`report-section ${wide ? "report-section-wide" : ""}`}><h2>{title}</h2>{children}</article>; }
+
+function DecisionReview({ detail }: { detail: TrainingReport["decisionDetails"][number] }) {
+  const strategyTotal = Object.values(detail.strategy).reduce((sum, value) => sum + value, 0);
+  return <details className={`report-decision ${detail.isCorrect ? "correct" : "incorrect"}`} open={!detail.isCorrect}>
+    <summary>
+      <span>#{detail.questionIndex + 1}</span><b>{detail.handClass}</b><i>{detail.heroPosition}</i>
+      <small>{reportActionLabel(detail.selectedAction)} → {reportActionLabel(detail.bestAction)}</small>
+      <strong>{detail.isCorrect ? "Na estratégia" : "Revisar"}</strong>
+    </summary>
+    <div className="report-decision-body">
+      <p>{detail.isMixed ? "Estratégia mista: mais de uma ação faz parte da solução." : "Estratégia predominante para esta mão."}</p>
+      <div className="report-strategy-grid">{Object.entries(detail.strategy).map(([key, value]) => {
+        const frequency = strategyTotal > 1.0001 ? value : value * 100;
+        const ev = detail.evs[key];
+        const selected = key === detail.selectedKey;
+        const best = key === detail.bestAction;
+        return <div key={key} className={`${selected ? "selected" : ""} ${best ? "best" : ""}`}>
+          <span>{reportActionLabel(key)}{selected ? " · sua escolha" : best ? " · maior EV" : ""}</span>
+          <b>{Number(frequency.toFixed(1))}%</b>
+          <small>EV {typeof ev === "number" ? formatReportEv(ev, detail.evUnit) : "—"}</small>
+        </div>;
+      })}</div>
+    </div>
+  </details>;
+}
+
+function reportActionLabel(value: string) {
+  const normalized = value.toLowerCase().replace(/[_-]/g, " ");
+  if (normalized.includes("fold")) return "Fold";
+  if (normalized.includes("check")) return "Check";
+  if (normalized.includes("call")) return "Call";
+  if (normalized.includes("all in") || normalized.includes("shove")) return "All-in";
+  if (normalized.includes("bet")) return "Bet";
+  if (normalized.includes("raise") || normalized.includes("open")) return "Raise";
+  return value;
+}
+
+function formatReportEv(value: number, unit: TrainingReport["decisionDetails"][number]["evUnit"]) {
+  const formatted = Number(value.toFixed(4));
+  if (unit === "BIG_BLINDS") return `${formatted} BB`;
+  if (unit === "CHIPS") return `${formatted} fichas`;
+  if (unit === "ICM_UTILITY") return `${formatted} ICM`;
+  return String(formatted);
+}
 
 function normalizeFilters(current: TrainingFilters, options: TrainingOptions): TrainingFilters {
   const trainingType = current.trainingType && options.trainingTypes.includes(current.trainingType) ? current.trainingType : undefined;
@@ -254,9 +424,9 @@ function normalizeFilters(current: TrainingFilters, options: TrainingOptions): T
   return { trainingType, equityModel, stackDepthBb, heroPosition };
 }
 
-function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["targetQuestions"], hasMatches: boolean): TrainingConfig | null {
-  if (!hasMatches || !filters.trainingType || !filters.equityModel) return null;
-  return { trainingType: filters.trainingType, equityModel: filters.equityModel, stackDepthBb: filters.stackDepthBb, heroPosition: filters.heroPosition, targetQuestions };
+function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["targetQuestions"], hasMatches: boolean, allowAny = false): TrainingConfig | null {
+  if (!hasMatches || (!allowAny && !filters.trainingType) || !filters.equityModel) return null;
+  return { trainingType: filters.trainingType ?? null, equityModel: filters.equityModel, stackDepthBb: filters.stackDepthBb, heroPosition: filters.heroPosition, targetQuestions };
 }
 
 function SelectField({ label, value, options, disabled, onChange }: { label: string; value: string | number; options: Array<{ value: string | number; label: string }>; disabled: boolean; onChange: (value: string) => void }) {
