@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { TrainingDecision } from "../components/training/TrainingDecision";
+import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import {
   EQUITY_MODELS,
   QUESTION_COUNTS,
@@ -10,6 +10,7 @@ import {
   equityModelLabels,
   evaluateChoice,
   formatBb,
+  gameTypeLabels,
   trainingTypeDescriptions,
   trainingTypeLabels,
   type TrainingAction,
@@ -20,10 +21,12 @@ import {
   type TrainingOptions,
   type TrainingReport,
   type TrainingSession,
+  type TrainingMode,
   type TrainingType,
 } from "../lib/training";
 
-const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false };
+const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false, tableContext: null };
+const ACTIVE_TRAINING_MODE: TrainingMode = "DECISION";
 
 type PendingSpotFeedback = {
   answer: AnswerEvaluation;
@@ -32,7 +35,7 @@ type PendingSpotFeedback = {
   report: TrainingReport | null;
 };
 
-export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, onClose, onStarted, onFullHand, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; onClose?: () => void; onStarted: (session: TrainingSession) => void; onFullHand?: () => void; embedded?: boolean }) {
+export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, onClose, onStarted, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; onClose?: () => void; onStarted: (session: TrainingSession) => void; embedded?: boolean }) {
   const [filters, setFilters] = useState<TrainingFilters>(initialFilters ?? { trainingType: preferredType });
   const [targetQuestions, setTargetQuestions] = useState<TrainingConfig["targetQuestions"]>(initialTargetQuestions);
   const [options, setOptions] = useState(EMPTY_OPTIONS);
@@ -87,7 +90,7 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
   const panel = <section className={`setup-card training-setup-card simplified-setup ${embedded ? "training-setup-embedded" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="setup-title">
       {!embedded && <button className="close-button" aria-label="Fechar" onClick={onClose}>×</button>}
       <div className="setup-heading"><span>CONFIGURAÇÃO DO TREINO</span><h2 id="setup-title">Prepare sua sessão</h2><p>Escolha o foco e o modelo. Os estudos publicados definem as mãos disponíveis.</p></div>
-      {onFullHand && <div className="setup-experience-switch"><label>Modo de treino</label><div><button type="button" className="selected">Drill de spots</button><button type="button" onClick={onFullHand}>Mão completa <small>BETA</small></button></div></div>}
+      <TrainingModeSelector/>
       <div className="setup-group"><label>Tipo de treinamento</label><div className="training-type-grid">{TRAINING_TYPES.map((type) => {
         const available = options.trainingTypes.includes(type);
         return <button key={type} type="button" disabled={!available || loading} className={filters.trainingType === type ? "selected" : ""} onClick={() => setFilters({ trainingType: type })}>
@@ -111,18 +114,18 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose?.(); }}>{panel}</div>;
 }
 
-const QUICK_PREFLOP_ACTIONS: Array<{ label: string; type?: TrainingType }> = [
-  { label: "Any" },
-  { label: "RFI", type: "OPEN_FOLD" },
-  { label: "vs Open", type: "VS_OPEN" },
-  { label: "vs 3bet" },
-  { label: "Push / Fold", type: "PUSH_FOLD" },
-  { label: "vs Shove", type: "CALL_VS_SHOVE" },
-  { label: "vs 4bet" },
-  { label: "From start" },
+const QUICK_PREFLOP_ACTIONS: Array<{ id: string; label: string; type?: TrainingType }> = [
+  { id: "ANY", label: "Qualquer" },
+  { id: "RFI", label: "RFI", type: "OPEN_FOLD" },
+  { id: "VS_OPEN", label: "vs Open", type: "VS_OPEN" },
+  { id: "VS_3_BET", label: "vs 3-bet" },
+  { id: "PUSH_FOLD", label: "Push / Fold", type: "PUSH_FOLD" },
+  { id: "VS_SHOVE", label: "vs Shove", type: "CALL_VS_SHOVE" },
+  { id: "VS_4_BET", label: "vs 4-bet" },
+  { id: "FROM_START", label: "Desde o início" },
 ];
 
-export function TrainingQuickSetup({ onStarted, onFullHand }: { onStarted: (session: TrainingSession) => void; onFullHand: () => void }) {
+export function TrainingQuickSetup({ onStarted }: { onStarted: (session: TrainingSession) => void }) {
   const [filters, setFilters] = useState<TrainingFilters>({});
   const [options, setOptions] = useState(EMPTY_OPTIONS);
   const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
@@ -160,7 +163,9 @@ export function TrainingQuickSetup({ onStarted, onFullHand }: { onStarted: (sess
   }, [filterQuery]);
 
   const config = buildConfig(filters, targetQuestions, options.hasMatches, true);
-  const modelLabel = filters.equityModel ? equityModelLabels[filters.equityModel] : "Selecionar";
+  const modelLabel = options.tableContext
+    ? `${gameTypeLabels[options.tableContext.gameType]} • ${equityModelLabels[options.tableContext.equityModel]}`
+    : "Nenhum modelo disponível";
 
   function cycleModel() {
     if (options.equityModels.length < 2) return;
@@ -186,38 +191,48 @@ export function TrainingQuickSetup({ onStarted, onFullHand }: { onStarted: (sess
   }
 
   return <>
+    <div className="training-lobby-table">
+      <TrainingTablePreview context={loading ? null : options.tableContext} loading={loading}/>
+    </div>
     <section className="training-quick-setup" aria-label="Configuração rápida do treino">
       <div className="quick-setup-group quick-solution">
-        <label>Solutions</label>
-        <div><button type="button" onClick={cycleModel} aria-label={`Solução MTT ${modelLabel}`}>MTT <i/>{modelLabel}</button><button type="button" className="quick-settings-icon" aria-label="Abrir todos os ajustes" onClick={() => setAdvancedOpen(true)}>⚙</button></div>
+        <label>Modelo</label>
+        <div><button type="button" disabled={!options.tableContext || loading} onClick={cycleModel} aria-label={`Modelo ${modelLabel}`} title={options.tableContext?.studyName}>{modelLabel}</button><button type="button" className="quick-settings-icon" aria-label="Abrir todas as configurações" onClick={() => setAdvancedOpen(true)}>⚙</button></div>
       </div>
-      <div className="quick-setup-group quick-starting-spot">
-        <label>Starting spot <small title="Street em que o drill começa">?</small></label>
-        <div><button type="button" className="selected">Preflop</button><button type="button" disabled title="Disponível quando houver estudos pós-flop">Flop</button><button type="button" disabled title="Disponível quando houver estudos customizados">Custom</button></div>
-      </div>
+      <TrainingModeSelector compact/>
       <div className="quick-setup-group quick-preflop-action">
-        <label>Preflop action <small title="Situação enfrentada pelo Hero">?</small></label>
+        <label>Ação pré-flop <small title="Situação enfrentada pelo Hero">?</small></label>
         <div>{QUICK_PREFLOP_ACTIONS.map((item) => {
-          const isAny = item.label === "Any";
+          const isAny = item.id === "ANY";
           const available = isAny ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
           const selected = isAny ? available && !filters.trainingType : item.type === filters.trainingType;
-          return <button type="button" key={item.label} disabled={!available || loading} title={available ? undefined : item.type ? "Nenhum estudo publicado para esta categoria" : "Em breve"} className={selected ? "selected" : ""} onClick={() => {
+          return <button type="button" key={item.id} disabled={!available || loading} title={available ? undefined : item.type ? "Nenhum estudo publicado para esta categoria" : "Ainda não há suporte para este filtro"} className={selected ? "selected" : ""} onClick={() => {
             if (isAny) setFilters((current) => ({ equityModel: current.equityModel }));
             else if (item.type) setFilters((current) => ({ trainingType: item.type, equityModel: current.equityModel }));
           }}>{item.label}</button>;
         })}</div>
       </div>
       {error && <div className="setup-error quick-setup-error" role="alert">{error}</div>}
-      <div className="quick-setup-actions"><button type="button" className="quick-all-settings" onClick={() => setAdvancedOpen(true)}><span>⚙</span> All settings</button><button type="button" className="quick-start-training" disabled={!config || loading || starting} onClick={start}><span>▶</span>{starting ? "Preparando…" : "Start training"}</button></div>
+      {!loading && !options.hasMatches && !error && <div className="quick-empty-studies">Importe um estudo para iniciar um treinamento.</div>}
+      <div className="quick-setup-actions"><button type="button" className="quick-all-settings" onClick={() => setAdvancedOpen(true)}><span>⚙</span> Todas as configurações</button><button type="button" className="quick-start-training" disabled={!config || loading || starting} onClick={start}><span>▶</span>{starting ? "Preparando…" : "Iniciar treino"}</button></div>
     </section>
     {advancedOpen && <TrainingSetup
       initialFilters={filters}
       initialTargetQuestions={targetQuestions}
       onClose={() => setAdvancedOpen(false)}
-      onFullHand={() => { setAdvancedOpen(false); onFullHand(); }}
       onStarted={(session) => { setAdvancedOpen(false); onStarted(session); }}
     />}
   </>;
+}
+
+function TrainingModeSelector({ compact = false }: { compact?: boolean }) {
+  return <div className={compact ? "quick-setup-group quick-training-mode" : "setup-experience-switch"}>
+    <label>Modo de treino</label>
+    <div>
+      <button type="button" className="selected" aria-pressed={ACTIVE_TRAINING_MODE === "DECISION"}>Decisão</button>
+      <button type="button" disabled aria-disabled="true" title="Em desenvolvimento">Mão completa <small>Em desenvolvimento</small></button>
+    </div>
+  </div>;
 }
 
 export function DatabaseTrainer({ session, onReport }: { session: TrainingSession; onReport: (report: TrainingReport) => void }) {

@@ -1,5 +1,5 @@
 import type { PokerCard, Rank } from "../../lib/poker/cards";
-import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction } from "../../lib/training";
+import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext } from "../../lib/training";
 import { PlayingCard } from "../play/PlayingCard";
 import { UnifiedActionPanel } from "./UnifiedActionPanel";
 import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
@@ -33,16 +33,36 @@ export function TrainingDecision({ exercise, busy, feedback, nextLabel = "Próxi
   </section>;
 }
 
-export function TrainingTablePreview() {
-  const seats = trainingTableSeats(8, "UTG").map<UnifiedTableSeat>((seat) => ({
-    position: seat.label,
-    positionKey: seat.position,
-    stackBb: 40,
-    dealer: seat.dealer,
-  }));
-  return <div className="unified-table-preview">
-    <UnifiedPokerTable seats={seats} anchorPosition="UTG" phase="DEALING" showDeck showChips={false} showSeatDetails={false} ariaLabel="Prévia da mesa de treinamento"/>
+export function TrainingTablePreview({ context, loading = false }: { context: TrainingTableContext | null; loading?: boolean }) {
+  const actionHistory = new Map<string, TrainingSequenceAction>();
+  context?.actionSequence.forEach((action) => {
+    if (action.position) actionHistory.set(normalizeTrainingPosition(action.position), action);
+  });
+  const heroPosition = context ? normalizeTrainingPosition(context.heroPosition) : "";
+  const seats = context ? previewTableSeats(context).map<UnifiedTableSeat>((seat) => {
+    const normalized = normalizeTrainingPosition(seat.position);
+    const hero = normalized === heroPosition;
+    return {
+      position: seat.label,
+      positionKey: seat.position,
+      stackBb: hero ? context.heroStackBb : undefined,
+      hero,
+      active: hero,
+      folded: actionHistory.get(normalized)?.type === "FOLD",
+      dealer: seat.dealer,
+    };
+  }) : [];
+  const emptyMessage = loading ? "Carregando estudos…" : "Nenhum estudo disponível";
+  return <div className={`unified-table-preview ${context ? "" : "is-empty"}`}>
+    <UnifiedPokerTable seats={seats} anchorPosition={context?.heroPosition ?? ""} phase="DEALING" showDeck={Boolean(context)} showChips={false} showSeatDetails={false} ariaLabel={context ? `Prévia real de ${context.studyName}` : "Mesa de treinamento sem estudo selecionado"}/>
+    {!context && <div className="training-table-empty" role="status"><b>{emptyMessage}</b>{!loading && <span>Importe e publique um estudo para iniciar um treinamento.</span>}</div>}
   </div>;
+}
+
+function previewTableSeats(context: TrainingTableContext) {
+  const seats = trainingTableSeats(context.playersCount, context.heroPosition);
+  if (context.playersCount !== 9) return seats;
+  return seats.filter((seat) => normalizeTrainingPosition(seat.position) !== "UTG+2");
 }
 
 function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
@@ -58,7 +78,7 @@ function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
     return {
       position: seat.label,
       positionKey: seat.position,
-      stackBb: exercise.heroStackBb,
+      stackBb: hero ? exercise.heroStackBb : undefined,
       cards: hero ? handClassPokerCards(exercise.handClass) : [],
       cardsVisible: hero,
       visibleCards: hero ? 2 : 0,

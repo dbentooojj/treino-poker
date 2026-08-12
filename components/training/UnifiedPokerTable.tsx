@@ -8,7 +8,7 @@ import { PotDisplay } from "../play/PotDisplay";
 export type UnifiedTableSeat = {
   position: string;
   positionKey?: string;
-  stackBb: number;
+  stackBb?: number;
   committedBb?: number;
   detail?: string;
   cards?: PokerCard[];
@@ -80,7 +80,7 @@ function UnifiedPokerSeat({ seat, slot, coordinate, showDetails }: { seat: Unifi
     <div className="play-player-box">
       {seat.dealer && <i className="play-dealer" aria-label="Dealer">D</i>}
       <strong>{seat.position}{seat.hero && <small>VOCÊ</small>}</strong>
-      {showDetails && <span>{seat.detail ?? `${formatBb(seat.stackBb)} BB${seat.allIn ? " · ALL-IN" : ""}`}</span>}
+      {showDetails && <span>{seat.detail ?? (seat.stackBb === undefined ? "Stack indisponível" : `${formatBb(seat.stackBb)} BB${seat.allIn ? " · ALL-IN" : ""}`)}</span>}
     </div>
     {seat.action && <div className={`play-action-tag play-action-tag--${seat.action.tone}`}>{seat.action.label}</div>}
   </div>;

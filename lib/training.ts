@@ -20,6 +20,9 @@ export type TrainingAction = {
 };
 
 export type TrainingSequenceAction = TrainingAction & { position?: string };
+export type TrainingMode = "DECISION" | "FULL_HAND";
+export type TrainingStreet = "PREFLOP" | "FLOP" | "TURN" | "RIVER";
+export type TrainingGameType = "TOURNAMENT";
 
 export type TrainingFilters = {
   trainingType?: TrainingType;
@@ -48,6 +51,18 @@ export type TrainingOptions = {
   stackDepthsBb: number[];
   heroPositions: string[];
   hasMatches: boolean;
+  tableContext: TrainingTableContext | null;
+};
+
+export type TrainingTableContext = {
+  trainingSetId: string;
+  studyName: string;
+  gameType: TrainingGameType;
+  equityModel: EquityModel;
+  playersCount: number;
+  heroStackBb: number;
+  heroPosition: string;
+  actionSequence: TrainingSequenceAction[];
 };
 
 export type QueueEntry = {
@@ -175,6 +190,7 @@ export const trainingTypeDescriptions: Record<TrainingType, string> = {
 };
 
 export const equityModelLabels: Record<EquityModel, string> = { CHIP_EV: "ChipEV", ICM: "ICM" };
+export const gameTypeLabels: Record<TrainingGameType, string> = { TOURNAMENT: "MTT" };
 
 export function actionKey(action: TrainingAction) { return action.id ?? action.type; }
 

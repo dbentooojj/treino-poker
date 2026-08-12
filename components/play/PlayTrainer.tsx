@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { MOCK_HANDS } from "../../lib/play/mock-hands";
 import { HandEngine } from "../../lib/play/hand-engine";
 import type { HandState, PlayableHandScenario } from "../../lib/play/types";
 import { ActionPanel } from "./ActionPanel";
 import { HandResult } from "./HandResult";
 import { PokerTable } from "./PokerTable";
 
-export function PlayTrainer({ scenarios = MOCK_HANDS }: { scenarios?: readonly PlayableHandScenario[] }) {
-  const availableScenarios = scenarios.length > 0 ? scenarios : MOCK_HANDS;
+export function PlayTrainer({ scenarios }: { scenarios: readonly PlayableHandScenario[] }) {
+  if (!scenarios.length) return <section className="play-trainer play-trainer-empty"><h2>Mão completa em desenvolvimento</h2><p>Ainda não há estudos pós-flop disponíveis para este modo.</p></section>;
+  return <ScenarioTrainer scenarios={scenarios}/>;
+}
+
+function ScenarioTrainer({ scenarios: availableScenarios }: { scenarios: readonly PlayableHandScenario[] }) {
   const [handIndex, setHandIndex] = useState(0);
   const [handNumber, setHandNumber] = useState(1);
   const [speed, setSpeed] = useState<"NORMAL" | "FAST">("NORMAL");
@@ -50,7 +53,7 @@ export function PlayTrainer({ scenarios = MOCK_HANDS }: { scenarios?: readonly P
   return <section className="play-trainer">
     <header className="play-context-bar">
       <div className="play-hand-context"><span>MÃO {handNumber}</span><b>{hand.title}</b><small>{hand.subtitle}</small></div>
-      <div className="play-context-pills"><span>{hand.solutionLabel ?? "MTT · ChipEV"}</span><span>{hand.players.length}-max</span><span>{hand.effectiveStackBb} BB</span><strong>{streetLabel(state.street)}</strong></div>
+      <div className="play-context-pills">{hand.solutionLabel && <span>{hand.solutionLabel}</span>}<span>{hand.players.length}-max</span><span>{hand.effectiveStackBb} BB</span><strong>{streetLabel(state.street)}</strong></div>
       <div className="play-speed" aria-label="Velocidade das animações"><span>VELOCIDADE</span><button type="button" className={speed === "NORMAL" ? "active" : ""} onClick={() => setSpeed("NORMAL")}>Normal</button><button type="button" className={speed === "FAST" ? "active" : ""} onClick={() => setSpeed("FAST")}>Rápida</button></div>
     </header>
     <div className="play-table-stage"><PokerTable state={state}/></div>

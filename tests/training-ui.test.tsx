@@ -4,7 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProgressExperience from "../app/progresso/progress-experience";
 import { TrainingReportView } from "../app/training-experience";
-import { TrainingDecision } from "../components/training/TrainingDecision";
+import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import {
   buildTrainingPrompt,
   sequenceActionLabel,
@@ -167,7 +167,7 @@ test("spots e mão completa usam os mesmos componentes visuais", async () => {
   assert.doesNotMatch(spot, /<div className="play-table-rail"|<div className="play-player-box"/);
 });
 
-test("navegação reúne drills e mão completa em treinar", async () => {
+test("treinar mantém mão completa indisponível sem cenários demonstrativos", async () => {
   const [header, legacyPlay, workspace, trainer, playTrainer] = await Promise.all([
     readFile(new URL("../app/member-header.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/jogar/page.tsx", import.meta.url), "utf8"),
@@ -176,20 +176,62 @@ test("navegação reúne drills e mão completa em treinar", async () => {
     readFile(new URL("../components/play/PlayTrainer.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(header, /href="\/treinar">Treinar/);
-  assert.match(legacyPlay, /\/treinar\?modo=mao-completa/);
-  assert.match(workspace, /mão completa/i);
+  assert.match(legacyPlay, /redirect\("\/treinar"\)/);
+  assert.doesNotMatch(workspace, /PlayTrainer|fullHandScenarios|MOCK_HANDS|cenários demonstrativos/);
   assert.doesNotMatch(workspace, /Novo drill|ÁREA DE TREINO/);
   assert.doesNotMatch(workspace, /if \(session\) return <DatabaseTrainer/);
   assert.match(workspace, /session \? <DatabaseTrainer/);
-  assert.match(workspace, /<PlayTrainer scenarios=\{fullHandScenarios\}\/>/);
   assert.doesNotMatch(playTrainer, /router\.(push|replace)|window\.location|rangelab-play-lock/);
-  assert.match(playTrainer, /scenarios\?: readonly PlayableHandScenario\[\]/);
+  assert.match(playTrainer, /scenarios: readonly PlayableHandScenario\[\]/);
+  assert.doesNotMatch(playTrainer, /MOCK_HANDS|MTT · ChipEV/);
   assert.match(trainer, /className="inline-training-session"/);
   assert.doesNotMatch(trainer, /training-screen training-screen-redesigned/);
-  for (const label of ["Solutions", "Starting spot", "Preflop action", "All settings", "Start training"]) assert.match(trainer, new RegExp(label));
+  for (const label of ["Modelo", "Modo de treino", "Decisão", "Mão completa", "Em desenvolvimento", "Ação pré-flop", "Qualquer", "Todas as configurações", "Iniciar treino"]) assert.match(trainer, new RegExp(label));
+  for (const removed of ["Solutions", "Starting spot", "Preflop action", "All settings", "Start training", "From start"]) assert.doesNotMatch(trainer, new RegExp(removed));
   assert.match(trainer, /options\.trainingTypes\.length > 0/);
   assert.match(trainer, /trainingType: filters\.trainingType \?\? null/);
   assert.match(trainer, /Todos os spots/);
+});
+
+test("prévia da mesa renderiza somente o contexto recebido de um estudo real", () => {
+  const markup = renderToStaticMarkup(<TrainingTablePreview context={{
+    trainingSetId: "set-real",
+    studyName: "HRC 6-max 20 BB",
+    gameType: "TOURNAMENT",
+    equityModel: "CHIP_EV",
+    playersCount: 6,
+    heroStackBb: 20,
+    heroPosition: "CO",
+    actionSequence: [{ position: "UTG", type: "FOLD" }],
+  }}/>);
+  assert.match(markup, /data-seat-count="6"/);
+  assert.match(markup, /Prévia real de HRC 6-max 20 BB/);
+  assert.match(markup, /data-position="CO" data-hero="true"/);
+  assert.doesNotMatch(markup, /40 BB/);
+
+  const empty = renderToStaticMarkup(<TrainingTablePreview context={null}/>);
+  assert.match(empty, /Nenhum estudo disponível/);
+  assert.match(empty, /Importe e publique um estudo/);
+  assert.equal((empty.match(/data-position=/g) ?? []).length, 0);
+});
+
+test("prévia 9-max omite UTG+2 e usa a geometria visual de oito assentos", () => {
+  const markup = renderToStaticMarkup(<TrainingTablePreview context={{
+    trainingSetId: "set-9-max",
+    studyName: "HRC 9-max 20 BB",
+    gameType: "TOURNAMENT",
+    equityModel: "CHIP_EV",
+    playersCount: 9,
+    heroStackBb: 20,
+    heroPosition: "CO",
+    actionSequence: [],
+  }}/>);
+  assert.match(markup, /data-seat-count="8"/);
+  assert.equal((markup.match(/data-position=/g) ?? []).length, 8);
+  assert.doesNotMatch(markup, /data-position="UTG\+2"/);
+  for (const position of ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"]) {
+    assert.match(markup, new RegExp(`data-position="${position.replace("+", "\\+")}"`));
+  }
 });
 
 function makeExercise(playersCount: number, availableActions: TrainingAction[], heroPosition = "BB"): TrainingExercise {

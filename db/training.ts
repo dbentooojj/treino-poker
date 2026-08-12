@@ -56,12 +56,32 @@ export async function getTrainingOptions(filters: TrainingFilters): Promise<Trai
   const equityModels = await distinct<EquityModel>(trainingSets.equityModel, filters, ["trainingType"]);
   const stackDepthsBb = await distinct<number>(trainingNodes.heroStackBb, filters, ["trainingType", "equityModel"]);
   const heroPositions = await distinct<string>(trainingNodes.heroPosition, filters, ["trainingType", "equityModel", "stackDepthBb"]);
-  const [match] = await getDb().select({ available: sql<number>`1` }).from(trainingHands)
+  const [match] = await getDb().select({
+    trainingSetId: trainingSets.id,
+    studyName: sql<string>`COALESCE(${trainingSets.displayName}, ${trainingSets.name})`,
+    gameType: trainingSets.gameType,
+    equityModel: trainingSets.equityModel,
+    playersCount: trainingSets.playersCount,
+    heroStackBb: trainingNodes.heroStackBb,
+    heroPosition: trainingNodes.heroPosition,
+    actionSequence: trainingNodes.actionSequence,
+  }).from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
     .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
     .where(and(...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
+    .orderBy(asc(trainingSets.displayOrder), asc(trainingSets.importedAt), asc(trainingSets.id), asc(trainingNodes.id), asc(trainingHands.id))
     .limit(1);
-  return { trainingTypes, equityModels, stackDepthsBb, heroPositions: sortPositions(heroPositions), hasMatches: Boolean(match) };
+  return {
+    trainingTypes,
+    equityModels,
+    stackDepthsBb,
+    heroPositions: sortPositions(heroPositions),
+    hasMatches: Boolean(match),
+    tableContext: match ? {
+      ...match,
+      actionSequence: match.actionSequence as TrainingSequenceAction[],
+    } : null,
+  };
 }
 
 export async function createTrainingSession(userId: string, request: SessionStartRequest): Promise<TrainingSession> {

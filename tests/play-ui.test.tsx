@@ -7,7 +7,7 @@ import { HandResult } from "../components/play/HandResult";
 import { PlayingCard } from "../components/play/PlayingCard";
 import { PokerTable } from "../components/play/PokerTable";
 import { HandEngine } from "../lib/play/hand-engine";
-import { MOCK_HANDS } from "../lib/play/mock-hands";
+import { PLAY_HAND_FIXTURES } from "./fixtures/play-hands";
 import { parseCard } from "../lib/poker/cards";
 
 test("PlayingCard usa quatro cores e um verso real de baralho", () => {
@@ -22,7 +22,7 @@ test("PlayingCard usa quatro cores e um verso real de baralho", () => {
 });
 
 test("mesa renderiza os oito assentos, blinds e duas cartas para todos", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   for (let index = 0; index < 16; index += 1) engine.dealNextCard();
   const html = renderToStaticMarkup(createElement(PokerTable, { state: engine.snapshot() }));
   for (const position of ["UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB"]) assert.match(html, new RegExp(`data-position="${position.replace("+", "\\+")}`));
@@ -34,8 +34,8 @@ test("mesa renderiza os oito assentos, blinds e duas cartas para todos", () => {
 });
 
 test("mesa rotaciona os assentos para manter qualquer posição do Hero embaixo", () => {
-  const btnEngine = new HandEngine(MOCK_HANDS[0]);
-  const bbEngine = new HandEngine(MOCK_HANDS[1]);
+  const btnEngine = new HandEngine(PLAY_HAND_FIXTURES[0]);
+  const bbEngine = new HandEngine(PLAY_HAND_FIXTURES[1]);
   const btnHtml = renderToStaticMarkup(createElement(PokerTable, { state: btnEngine.snapshot() }));
   const bbHtml = renderToStaticMarkup(createElement(PokerTable, { state: bbEngine.snapshot() }));
   assert.match(btnHtml, /play-seat-1[^\"]*play-seat--hero[^\"]*\" data-position=\"BTN\"/);
@@ -43,7 +43,7 @@ test("mesa rotaciona os assentos para manter qualquer posição do Hero embaixo"
 });
 
 test("geometria 8-max mantém três assentos em cima, três embaixo e um em cada ponta", () => {
-  const html = renderToStaticMarkup(createElement(PokerTable, { state: new HandEngine(MOCK_HANDS[0]).snapshot() }));
+  const html = renderToStaticMarkup(createElement(PokerTable, { state: new HandEngine(PLAY_HAND_FIXTURES[0]).snapshot() }));
   const expectedSlots = { BTN: 1, SB: 2, BB: 3, UTG: 4, "UTG+1": 5, LJ: 6, HJ: 7, CO: 8 } as const;
   for (const [position, slot] of Object.entries(expectedSlots)) {
     assert.match(html, new RegExp(`play-seat-${slot}[^\"]*\" data-position=\"${position.replace("+", "\\+")}\"`));
@@ -51,7 +51,7 @@ test("geometria 8-max mantém três assentos em cima, três embaixo e um em cada
 });
 
 test("painel do Hero mostra somente as ações válidas sem feedback imediato", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   for (let index = 0; index < 16; index += 1) engine.dealNextCard();
   for (let index = 0; index < 5; index += 1) {
     engine.act(engine.automaticAction()!.id);

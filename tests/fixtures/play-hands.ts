@@ -1,9 +1,9 @@
-import { parseCard } from "../poker/cards";
-import type { HandNode, MockHand, MockPlayer, PlayPosition } from "./types";
+import { parseCard } from "../../lib/poker/cards";
+import type { HandNode, PlayableHandScenario, PlayablePlayer, PlayPosition } from "../../lib/play/types";
 
 const card = parseCard;
 
-function player(position: PlayPosition, first: string, second: string): MockPlayer {
+function player(position: PlayPosition, first: string, second: string): PlayablePlayer {
   return { position, cards: [card(first), card(second)] };
 }
 
@@ -124,9 +124,9 @@ const thirdHandNodes: HandNode[] = [
   auto("h3-btn-call-river", "RIVER", "BTN", "CALL", "SHOWDOWN"),
 ];
 
-export const MOCK_HANDS: readonly MockHand[] = [
+export const PLAY_HAND_FIXTURES: readonly PlayableHandScenario[] = [
   {
-    source: "DEMO",
+    source: "TEST",
     id: "btn-aj-vs-bb-kj",
     title: "BTN vs BB",
     subtitle: "Single-raised pot",
@@ -141,7 +141,7 @@ export const MOCK_HANDS: readonly MockHand[] = [
     nodes: firstHandNodes,
   },
   {
-    source: "DEMO",
+    source: "TEST",
     id: "bb-kq-vs-btn",
     title: "BB vs BTN",
     subtitle: "Defesa do big blind",
@@ -156,7 +156,7 @@ export const MOCK_HANDS: readonly MockHand[] = [
     nodes: secondHandNodes,
   },
   {
-    source: "DEMO",
+    source: "TEST",
     id: "co-queens-vs-btn",
     title: "CO vs BTN",
     subtitle: "Valor fora de posição",

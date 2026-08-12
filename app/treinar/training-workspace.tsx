@@ -1,20 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PlayTrainer } from "../../components/play/PlayTrainer";
-import { TrainingTablePreview } from "../../components/training/TrainingDecision";
 import type { AuthUser } from "../../db/auth";
-import type { PlayableHandScenario } from "../../lib/play/types";
 import type { TrainingReport, TrainingSession } from "../../lib/training";
 import MemberHeader from "../member-header";
 import { DatabaseTrainer, TrainingQuickSetup, TrainingReportView } from "../training-experience";
 
-type TrainingMode = "SPOTS" | "FULL_HAND";
-
 const LAST_TRAINING_SESSION_KEY = "rangelab:last-training-session";
 
-export default function TrainingWorkspace({ user, initialMode, fullHandScenarios }: { user: AuthUser; initialMode: TrainingMode; fullHandScenarios?: readonly PlayableHandScenario[] }) {
-  const [mode, setMode] = useState<TrainingMode>(initialMode);
+export default function TrainingWorkspace({ user }: { user: AuthUser }) {
   const [session, setSession] = useState<TrainingSession | null>(null);
   const [report, setReport] = useState<TrainingReport | null>(null);
   const [restoring, setRestoring] = useState(true);
@@ -70,17 +64,11 @@ export default function TrainingWorkspace({ user, initialMode, fullHandScenarios
 
   if (report) return <TrainingReportView report={report} onExit={leaveTraining} onStarted={rememberTraining}/>;
 
-  return <main className={`member-shell training-hub-shell ${session || mode === "SPOTS" ? "spot-mode" : "full-hand-mode"} ${session ? "spot-session-mode" : ""}`}>
+  return <main className={`member-shell training-hub-shell spot-mode ${session ? "spot-session-mode" : ""}`}>
     <MemberHeader user={user} active="training"/>
     <section className="training-hub" aria-label="Treinamento">
-      {restoring ? <div className="training-restore-state" role="status"><i/><span>Retomando sua última sessão…</span></div> : session ? <DatabaseTrainer key={session.id} session={session} onReport={setReport}/> : mode === "SPOTS" ? <div className="training-lobby">
-        <div className="training-lobby-table">
-          <TrainingTablePreview/>
-        </div>
-        <TrainingQuickSetup onStarted={rememberTraining} onFullHand={() => setMode("FULL_HAND")}/>
-      </div> : <div className="training-full-hand">
-        <div className="training-beta-note"><div><span>BETA</span><b>Treino de mão completa</b></div><p>Este modo usa cenários demonstrativos enquanto os estudos pós-flop ainda não estão disponíveis.</p><button type="button" onClick={() => setMode("SPOTS")}>Voltar aos drills</button></div>
-        <PlayTrainer scenarios={fullHandScenarios}/>
+      {restoring ? <div className="training-restore-state" role="status"><i/><span>Retomando sua última sessão…</span></div> : session ? <DatabaseTrainer key={session.id} session={session} onReport={setReport}/> : <div className="training-lobby">
+        <TrainingQuickSetup onStarted={rememberTraining}/>
       </div>}
     </section>
   </main>;

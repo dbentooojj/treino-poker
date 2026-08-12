@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { HandEngine } from "../lib/play/hand-engine";
-import { MOCK_HANDS } from "../lib/play/mock-hands";
+import { PLAY_HAND_FIXTURES } from "./fixtures/play-hands";
 import type { HandState, PlayableHandScenario, PlayPosition } from "../lib/play/types";
 
 function deal(engine: HandEngine) {
@@ -42,7 +42,7 @@ function reachFlop(engine: HandEngine) {
 }
 
 test("ordem pré-flop avança por UTG, UTG+1, LJ, HJ e CO e pausa no Hero", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   deal(engine);
   assert.equal(engine.snapshot().activePosition, "UTG");
   assert.deepEqual(playOpeningFolds(engine), ["UTG", "UTG+1", "LJ", "HJ", "CO"]);
@@ -53,7 +53,7 @@ test("ordem pré-flop avança por UTG, UTG+1, LJ, HJ e CO e pausa no Hero", () =
 });
 
 test("fold envia o jogador ao muck e ele não pode agir novamente", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   deal(engine);
   engine.act(engine.automaticAction()!.id);
   const folding = engine.snapshot();
@@ -65,7 +65,7 @@ test("fold envia o jogador ao muck e ele não pode agir novamente", () => {
 });
 
 test("raise, blinds e call atualizam committed chips, stacks e pote", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   deal(engine);
   playOpeningFolds(engine);
   engine.act("raise-2.2");
@@ -87,7 +87,7 @@ test("raise, blinds e call atualizam committed chips, stacks e pote", () => {
 });
 
 test("mão principal avança FLOP → TURN → RIVER → SHOWDOWN e paga o vencedor", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   reachFlop(engine);
   assert.equal(engine.snapshot().street, "FLOP");
   assert.equal(engine.snapshot().activePosition, "BB");
@@ -128,12 +128,12 @@ test("mão principal avança FLOP → TURN → RIVER → SHOWDOWN e paga o vence
 });
 
 test("ação inválida é bloqueada e nova mão reinicia todo o estado sem reload", () => {
-  const engine = new HandEngine(MOCK_HANDS[0]);
+  const engine = new HandEngine(PLAY_HAND_FIXTURES[0]);
   deal(engine);
   playOpeningFolds(engine);
   assert.throws(() => engine.act("call"), /Ação inválida/);
 
-  const next = new HandEngine(MOCK_HANDS[1], 2).snapshot();
+  const next = new HandEngine(PLAY_HAND_FIXTURES[1], 2).snapshot();
   assert.equal(next.handNumber, 2);
   assert.equal(next.board.length, 0);
   assert.equal(next.muckCount, 0);
@@ -144,8 +144,8 @@ test("ação inválida é bloqueada e nova mão reinicia todo o estado sem reloa
   assert.equal(player(next, "BB").committedBb, 1);
 });
 
-test("as três mãos mock percorrem seus caminhos preferenciais até o fim", () => {
-  for (const hand of MOCK_HANDS) {
+test("as três fixtures percorrem seus caminhos preferenciais até o fim", () => {
+  for (const hand of PLAY_HAND_FIXTURES) {
     const engine = new HandEngine(hand);
     let guard = 0;
     while (engine.snapshot().phase !== "FINISHED" && guard < 200) {
@@ -172,7 +172,7 @@ test("as três mãos mock percorrem seus caminhos preferenciais até o fim", () 
 
 test("o mesmo motor aceita um cenário proveniente de futuro import HRC", () => {
   const importedScenario: PlayableHandScenario = {
-    ...MOCK_HANDS[0],
+    ...PLAY_HAND_FIXTURES[0],
     source: "HRC",
     externalStudyId: "hrc-study-123",
   };

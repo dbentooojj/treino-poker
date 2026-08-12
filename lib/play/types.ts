@@ -25,7 +25,7 @@ export type StrategyActionSnapshot = {
 
 /** Contrato futuro entre uma árvore HRC e o motor, sempre preservando o combo exato. */
 export type StrategyNodeSnapshot = {
-  source: "MOCK" | "HRC";
+  source: "HRC" | "TEST";
   externalNodeId: string;
   board: PokerCard[];
   exactCombo: [PokerCard, PokerCard];
@@ -48,9 +48,9 @@ export type PlayablePlayer = {
   cards: [PokerCard, PokerCard];
 };
 
-/** Contrato consumido pelo motor, independentemente de vir do demo ou de um futuro import HRC pós-flop. */
+/** Contrato consumido pelo motor, independente da origem do cenário. */
 export type PlayableHandScenario = {
-  source: "DEMO" | "HRC";
+  source: "HRC" | "TEST";
   externalStudyId?: string;
   solutionLabel?: string;
   id: string;
@@ -66,9 +66,6 @@ export type PlayableHandScenario = {
   firstNodeId: string;
   nodes: HandNode[];
 };
-
-export type MockPlayer = PlayablePlayer;
-export type MockHand = PlayableHandScenario;
 
 export type PlayerState = {
   position: PlayPosition;
