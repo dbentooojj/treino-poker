@@ -48,7 +48,7 @@ Variáveis:
 | `SITE_ADDRESS` | Domínio público do Caddy em produção |
 | `ALLOW_INSECURE_LOCAL_HTTP` | Somente teste Docker local: permite HTTP para `localhost` ou IP privado; não habilita HTTP público |
 | `HTTP_PORT` / `HTTPS_PORT` | Portas publicadas pelo Caddy |
-| `RESEND_API_KEY` / `EMAIL_FROM` | Recuperação de senha por e-mail; obrigatórias em produção |
+| `RESEND_API_KEY` / `EMAIL_FROM` | Confirmação de cadastro e recuperação de senha por e-mail; obrigatórias em produção |
 
 Dentro do Compose, `DATABASE_URL` é montada a partir de `POSTGRES_*` e aponta para o hostname interno `postgres`. Nenhuma credencial fica no código-fonte.
 

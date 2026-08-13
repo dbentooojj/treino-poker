@@ -1,4 +1,5 @@
-import { consumeAuthRateLimit, createSession, isTrustedOrigin, normalizeEmail, registerUser, sessionCookie } from "../../../../db/auth";
+import { consumeAuthRateLimit, isTrustedOrigin, normalizeEmail, registerUser } from "../../../../db/auth";
+import { passwordResetBaseUrl, sendEmailVerificationEmail } from "../../../../db/email";
 import { passwordPolicyError } from "../../../../lib/password-policy";
 
 export async function POST(request: Request) {
@@ -14,11 +15,24 @@ export async function POST(request: Request) {
     if (passwordError) return Response.json({ error: passwordError }, { status: 400 });
     if (!await consumeAuthRateLimit(request, "register", email, 5, 60 * 60 * 1000)) return Response.json({ error: "Muitas tentativas. Aguarde antes de tentar novamente." }, { status: 429 });
     const user = await registerUser(name, email, password);
-    const session = await createSession(user.id, true);
-    return Response.json({ user }, { status: 201, headers: { "Set-Cookie": sessionCookie(session.token, session.maxAge) } });
+    const verificationUrl = new URL(`/confirmar-email?token=${encodeURIComponent(user.verificationToken)}`, passwordResetBaseUrl(request)).toString();
+    let emailSent = false;
+    try {
+      emailSent = (await sendEmailVerificationEmail(user.email, verificationUrl)).sent;
+    } catch {
+      console.error("[auth/register] conta criada, mas o provedor de e-mail falhou");
+    }
+    return Response.json({
+      ok: true,
+      pendingVerification: true,
+      emailSent,
+      ...(process.env.NODE_ENV !== "production" ? { devVerificationUrl: verificationUrl } : {}),
+    }, { status: 201, headers: noStoreHeaders() });
   } catch (error) {
     if (error instanceof Error && error.message === "EMAIL_IN_USE") return Response.json({ error: "Este e-mail já está cadastrado." }, { status: 409 });
     console.error("[auth/register] falha", error);
     return Response.json({ error: "Não foi possível criar a conta." }, { status: 500 });
   }
 }
+
+function noStoreHeaders() { return { "Cache-Control": "private, no-store, max-age=0" }; }

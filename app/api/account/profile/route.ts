@@ -1,4 +1,5 @@
 import { consumeAuthRateLimit, getSessionUser, isTrustedOrigin, normalizeEmail, updateUserProfile } from "../../../../db/auth";
+import { passwordResetBaseUrl, sendEmailVerificationEmail } from "../../../../db/email";
 
 export async function PATCH(request: Request) {
   try {
@@ -21,7 +22,17 @@ export async function PATCH(request: Request) {
       if (result.reason === "EMAIL_IN_USE") return Response.json({ error: "Este e-mail já está em uso." }, { status: 409 });
       return Response.json({ error: "Conta não encontrada." }, { status: 404 });
     }
-    return Response.json({ user: result.user });
+    if (result.verificationToken) {
+      const verificationUrl = new URL(`/confirmar-email?token=${encodeURIComponent(result.verificationToken)}`, passwordResetBaseUrl(request)).toString();
+      let emailSent = false;
+      try {
+        emailSent = (await sendEmailVerificationEmail(result.user.email, verificationUrl)).sent;
+      } catch {
+        console.error("[account/profile] e-mail alterado, mas o provedor de e-mail falhou");
+      }
+      return Response.json({ user: result.user, pendingVerification: true, emailSent });
+    }
+    return Response.json({ user: result.user, pendingVerification: false });
   } catch {
     return Response.json({ error: "Não foi possível atualizar seus dados." }, { status: 500 });
   }

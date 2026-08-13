@@ -27,13 +27,21 @@ export default function AccountExperience({ initialUser }: { initialUser: AuthUs
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, currentPassword: profilePassword }),
       });
-      const data = await response.json() as { user?: AuthUser; error?: string };
+      const data = await response.json() as { user?: AuthUser; error?: string; pendingVerification?: boolean; emailSent?: boolean };
       if (!response.ok || !data.user) throw new Error(data.error ?? "Não foi possível salvar seus dados.");
       setUser(data.user);
       setName(data.user.name);
       setEmail(data.user.email);
       setProfilePassword("");
-      setProfileState({ loading: false, error: "", success: "Dados atualizados com sucesso." });
+      setProfileState({
+        loading: false,
+        error: "",
+        success: data.pendingVerification
+          ? data.emailSent === false
+            ? "E-mail alterado e sessões encerradas, mas o envio falhou. Use o link abaixo para solicitar uma nova confirmação."
+            : "E-mail alterado. Enviamos um link de confirmação e encerramos suas sessões. Confirme o novo endereço antes de entrar novamente."
+          : "Dados atualizados com sucesso.",
+      });
     } catch (error) {
       setProfileState({ loading: false, error: error instanceof Error ? error.message : "Não foi possível salvar seus dados.", success: "" });
     }
@@ -84,7 +92,7 @@ export default function AccountExperience({ initialUser }: { initialUser: AuthUs
             <label htmlFor="profile-password">Senha atual <small>necessária somente ao trocar o e-mail</small></label>
             <input id="profile-password" type="password" value={profilePassword} onChange={(event) => setProfilePassword(event.target.value)} autoComplete="current-password" placeholder="Confirme para alterar o e-mail" />
             {profileState.error && <StatusMessage className="settings-status" tone="error">{profileState.error}</StatusMessage>}
-            {profileState.success && <StatusMessage className="settings-status" tone="success">{profileState.success}</StatusMessage>}
+            {profileState.success && <StatusMessage className="settings-status" tone="success">{profileState.success} {user.email !== initialUser.email && <a href={`/reenviar-confirmacao?email=${encodeURIComponent(user.email)}`}>Reenviar link</a>}</StatusMessage>}
             <Button className="settings-submit-system" type="submit" fullWidth loading={profileState.loading}>Salvar alterações</Button>
           </form>
         </section>
