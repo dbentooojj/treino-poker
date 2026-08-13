@@ -1,0 +1,272 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: Digite PRODUCAO para confirmar o deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rangelab-production
+  cancel-in-progress: false
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  authorize:
+    name: Confirmar deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validar confirmação e branch
+        env:
+          DEPLOY_CONFIRMATION: ${{ inputs.confirmacao }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$DEPLOY_CONFIRMATION" != "PRODUCAO" ]]; then
+            echo "::error::Confirmação inválida. Digite exatamente PRODUCAO."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::O deploy de produção aceita somente a branch main."
+            exit 1
+          fi
+
+  validate:
+    name: Validar commit
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Obter commit selecionado
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci --no-audit --no-fund
+
+      - name: Executar validações
+        run: npm test
+
+  deploy:
+    name: Implantar em produção
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: production
+      url: https://rangelab.duckdns.org
+    steps:
+      - name: Configurar SSH
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_PORT: ${{ secrets.PROD_PORT }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          for variable in PROD_HOST PROD_USER PROD_PORT PROD_SSH_KEY PROD_KNOWN_HOSTS; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::O secret obrigatório ${variable} não está configurado."
+              exit 1
+            fi
+          done
+          if [[ ! "$PROD_PORT" =~ ^[0-9]+$ ]]; then
+            echo "::error::PROD_PORT deve ser numérico."
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$PROD_SSH_KEY" > "$HOME/.ssh/id_prod"
+          chmod 600 "$HOME/.ssh/id_prod"
+          printf '%s\n' "$PROD_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Implantar commit selecionado
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_PORT: ${{ secrets.PROD_PORT }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "$HOME/.ssh/id_prod" \
+            -p "$PROD_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$PROD_USER@$PROD_HOST" \
+            bash -se -- "$GITHUB_SHA" <<'REMOTE'
+          set -Eeuo pipefail
+
+          TARGET_SHA="${1:-unknown}"
+          OLD_SHA="unknown"
+          BACKUP_TMP=""
+          COMPOSE_READY=false
+          COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.vps.yml)
+
+          report_exit() {
+            status=$?
+            trap - EXIT
+            if [[ -n "$BACKUP_TMP" && -f "$BACKUP_TMP" ]]; then
+              rm -f -- "$BACKUP_TMP"
+            fi
+            if (( status != 0 )); then
+              echo "Deploy de produção falhou."
+              echo "OLD_SHA=$OLD_SHA"
+              echo "TARGET_SHA=$TARGET_SHA"
+              if [[ "$COMPOSE_READY" == true ]]; then
+                "${COMPOSE[@]}" logs --no-color --tail=200 app migrate || true
+              fi
+              echo "Nenhum rollback automático foi executado."
+            fi
+            exit "$status"
+          }
+          trap report_exit EXIT
+
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "TARGET_SHA inválido."
+            exit 1
+          fi
+          if [[ ! -d /opt/rangelab ]]; then
+            echo "Diretório /opt/rangelab não existe."
+            exit 1
+          fi
+          cd /opt/rangelab
+          if [[ ! -f .env ]]; then
+            echo "Arquivo .env de produção não existe."
+            exit 1
+          fi
+          for command_name in git docker gzip sha256sum curl; do
+            if ! command -v "$command_name" >/dev/null 2>&1; then
+              echo "Comando obrigatório ausente: $command_name"
+              exit 1
+            fi
+          done
+          git rev-parse --is-inside-work-tree >/dev/null
+          docker compose version >/dev/null
+          docker info >/dev/null
+          docker network inspect web_proxy >/dev/null
+          COMPOSE_READY=true
+
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "O .env está rastreado pelo Git; deploy interrompido para preservá-lo."
+            exit 1
+          fi
+          ENV_FINGERPRINT="$(sha256sum .env | awk '{print $1}')"
+          OLD_SHA="$(git rev-parse HEAD)"
+
+          POSTGRES_CONTAINER="$("${COMPOSE[@]}" ps -q postgres)"
+          if [[ -z "$POSTGRES_CONTAINER" ]]; then
+            echo "Container PostgreSQL existente não foi encontrado."
+            exit 1
+          fi
+          if [[ "$(docker inspect --format '{{.State.Running}}' "$POSTGRES_CONTAINER")" != "true" ]]; then
+            echo "Container PostgreSQL existente não está em execução."
+            exit 1
+          fi
+
+          umask 077
+          BACKUP_DIR=/home/rangelab-deploy/backups
+          mkdir -p "$BACKUP_DIR"
+          BACKUP_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          BACKUP_PATH="$BACKUP_DIR/predeploy-$BACKUP_TIMESTAMP.sql.gz"
+          if [[ -e "$BACKUP_PATH" ]]; then
+            echo "O arquivo de backup de destino já existe."
+            exit 1
+          fi
+          BACKUP_TMP="$(mktemp "/tmp/rangelab-predeploy-$BACKUP_TIMESTAMP.XXXXXX.sql.gz")"
+          docker exec "$POSTGRES_CONTAINER" sh -eu -c \
+            'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+            | gzip -c > "$BACKUP_TMP"
+          test -s "$BACKUP_TMP"
+          gzip -t "$BACKUP_TMP"
+          mv "$BACKUP_TMP" "$BACKUP_PATH"
+          BACKUP_TMP=""
+          chmod 600 "$BACKUP_PATH"
+          echo "Backup pré-deploy criado em $BACKUP_PATH"
+
+          git fetch origin main
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          if ! git merge-base --is-ancestor "$TARGET_SHA" origin/main; then
+            echo "TARGET_SHA não pertence à branch main remota."
+            exit 1
+          fi
+          if git cat-file -e "${TARGET_SHA}:.env" 2>/dev/null; then
+            echo "O commit alvo rastreia .env; deploy interrompido."
+            exit 1
+          fi
+          git reset --hard "$TARGET_SHA"
+
+          if [[ ! -f .env || "$(sha256sum .env | awk '{print $1}')" != "$ENV_FINGERPRINT" ]]; then
+            echo "O .env de produção não foi preservado."
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$TARGET_SHA" ]]; then
+            echo "O checkout não corresponde ao TARGET_SHA."
+            exit 1
+          fi
+
+          "${COMPOSE[@]}" config --quiet
+          if "${COMPOSE[@]}" config --services | grep -Fxq caddy; then
+            echo "O Caddy interno apareceu entre os serviços ativos."
+            exit 1
+          fi
+          "${COMPOSE[@]}" build migrate app
+          "${COMPOSE[@]}" up -d --no-build postgres migrate app
+
+          if ! docker inspect rangelab_app >/dev/null 2>&1; then
+            echo "Container rangelab_app não existe após o deploy."
+            exit 1
+          fi
+          APP_HEALTHY=false
+          for _ in {1..30}; do
+            APP_STATUS="$(docker inspect --format '{{.State.Status}}' rangelab_app)"
+            APP_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' rangelab_app)"
+            if [[ "$APP_STATUS" == "running" && "$APP_HEALTH" == "healthy" ]]; then
+              APP_HEALTHY=true
+              break
+            fi
+            if [[ "$APP_STATUS" == "exited" || "$APP_STATUS" == "dead" || "$APP_HEALTH" == "unhealthy" ]]; then
+              echo "rangelab_app falhou: status=$APP_STATUS health=$APP_HEALTH"
+              exit 1
+            fi
+            sleep 5
+          done
+          if [[ "$APP_HEALTHY" != true ]]; then
+            echo "rangelab_app não ficou saudável dentro de 150 segundos."
+            exit 1
+          fi
+
+          PUBLIC_HEALTHY=false
+          for _ in {1..12}; do
+            if HEALTH_BODY="$(curl --fail --silent --show-error --max-time 10 https://rangelab.duckdns.org/api/health)" \
+              && printf '%s' "$HEALTH_BODY" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+              PUBLIC_HEALTHY=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$PUBLIC_HEALTHY" != true ]]; then
+            echo "O endpoint público não retornou status ok."
+            exit 1
+          fi
+
+          "${COMPOSE[@]}" ps
+          echo "Commit implantado: $(git rev-parse HEAD)"
+          docker image prune -f
+          REMOTE
