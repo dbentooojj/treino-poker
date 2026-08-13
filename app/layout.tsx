@@ -28,5 +28,5 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="pt-BR"><body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body></html>;
+  return <html lang="pt-BR"><body className={`${geistSans.variable} ${geistMono.variable}`}><a className="skip-link" href="#main-content">Pular para o conteúdo</a><div id="main-content" tabIndex={-1}>{children}</div></body></html>;
 }

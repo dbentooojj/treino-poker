@@ -54,15 +54,13 @@ export function TrainingTablePreview({ context, loading = false }: { context: Tr
   }) : [];
   const emptyMessage = loading ? "Carregando estudos…" : "Nenhum estudo disponível";
   return <div className={`unified-table-preview ${context ? "" : "is-empty"}`}>
-    <UnifiedPokerTable seats={seats} anchorPosition={context?.heroPosition ?? ""} phase="DEALING" showDeck={Boolean(context)} showChips={false} showSeatDetails={false} ariaLabel={context ? `Prévia real de ${context.studyName}` : "Mesa de treinamento sem estudo selecionado"}/>
+    <UnifiedPokerTable seats={seats} anchorPosition={context?.heroPosition ?? ""} phase="DEALING" showDeck={false} showChips={false} showSeatDetails={false} ariaLabel={context ? `Prévia real de ${context.studyName}` : "Mesa de treinamento sem estudo selecionado"}/>
     {!context && <div className="training-table-empty" role="status"><b>{emptyMessage}</b>{!loading && <span>Importe e publique um estudo para iniciar um treinamento.</span>}</div>}
   </div>;
 }
 
 function previewTableSeats(context: TrainingTableContext) {
-  const seats = trainingTableSeats(context.playersCount, context.heroPosition);
-  if (context.playersCount !== 9) return seats;
-  return seats.filter((seat) => normalizeTrainingPosition(seat.position) !== "UTG+2");
+  return visibleTrainingTableSeats(context.playersCount, context.heroPosition);
 }
 
 function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
@@ -71,7 +69,7 @@ function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
     if (action.position) actionHistory.set(normalizeTrainingPosition(action.position), action);
   });
   const heroPosition = normalizeTrainingPosition(exercise.heroPosition);
-  const seats = trainingTableSeats(exercise.playersCount, exercise.heroPosition).map<UnifiedTableSeat>((seat) => {
+  const seats = visibleTrainingTableSeats(exercise.playersCount, exercise.heroPosition).map<UnifiedTableSeat>((seat) => {
     const normalized = normalizeTrainingPosition(seat.position);
     const hero = normalized === heroPosition;
     const sequenceEntry = actionHistory.get(normalized);
@@ -97,6 +95,11 @@ function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
     className="spot-poker-table"
     ariaLabel={`Mesa do spot com ${exercise.playersCount} jogadores`}
   />;
+}
+
+function visibleTrainingTableSeats(playersCount: number, heroPosition: string) {
+  const seats = trainingTableSeats(playersCount, heroPosition);
+  return playersCount === 9 ? seats.filter((seat) => normalizeTrainingPosition(seat.position) !== "UTG+2") : seats;
 }
 
 function SpotActionPanel({ exercise, busy, onChoose }: { exercise: TrainingExercise; busy: boolean; onChoose: (action: TrainingAction) => void }) {

@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { createPortal } from "react-dom";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { RANKS, type PokerCard } from "../../lib/poker/cards";
 import {
   availableRangeCombinations,
@@ -14,6 +13,8 @@ import {
   VILLAIN_RANGE_PRESETS,
   type RangeWeightMap,
 } from "../../lib/poker/range";
+import { Button } from "../ui/Button";
+import { Modal } from "../ui/Modal";
 
 type VillainRangeSelectorProps = {
   selectedWeights: RangeWeightMap;
@@ -23,7 +24,6 @@ type VillainRangeSelectorProps = {
 };
 
 const STARTING_HAND_MATRIX = buildStartingHandMatrix();
-const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 function sameHands(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -44,10 +44,7 @@ export default function VillainRangeSelector({
 }: VillainRangeSelectorProps) {
   const [draftWeights, setDraftWeights] = useState<RangeWeightMap>(() => ({ ...selectedWeights }));
   const [focusedCell, setFocusedCell] = useState(0);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const cellRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const cancelRef = useRef(onCancel);
 
   const selectedHands = useMemo(
     () => handClassesFromRangeWeightMap(draftWeights),
@@ -72,46 +69,6 @@ export default function VillainRangeSelector({
   );
   const rangePercent = totalCombinations / TOTAL_STARTING_HAND_COMBINATIONS * 100;
   const activePreset = VILLAIN_RANGE_PRESETS.find((preset) => sameHands(selectedHands, preset.hands));
-
-  useEffect(() => {
-    cancelRef.current = onCancel;
-  }, [onCancel]);
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus();
-
-    function handleDocumentKeyDown(event: globalThis.KeyboardEvent): void {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        cancelRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", handleDocumentKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleDocumentKeyDown);
-      document.body.style.overflow = previousOverflow;
-      previouslyFocused?.focus();
-    };
-  }, []);
 
   function toggleHand(handClass: string): void {
     setDraftWeights((current) => toggleRangeHandWeight(current, handClass));
@@ -138,30 +95,13 @@ export default function VillainRangeSelector({
     cellRefs.current[nextIndex]?.focus();
   }
 
-  if (typeof document === "undefined") return null;
-
-  return createPortal(
-    <div
-      className="range-modal-overlay"
-      onPointerDown={(event) => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <div
-        className="range-modal"
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="villain-range-title"
-        aria-describedby="villain-range-description"
-      >
+  return <Modal titleId="villain-range-title" descriptionId="villain-range-description" onClose={onCancel} className="range-modal" closeLabel="Cancelar e fechar seletor de range">
         <header className="range-modal-header">
           <div>
             <span>RANGE DO VILÃO</span>
             <h3 id="villain-range-title">Escolha as mãos que fazem parte do range</h3>
             <p id="villain-range-description">Cada célula alterna entre 0% e 100%. O cálculo será feito somente ao aplicar.</p>
           </div>
-          <button ref={closeButtonRef} type="button" className="range-modal-close" aria-label="Cancelar e fechar seletor de range" onClick={onCancel}>×</button>
         </header>
 
         <div className="range-presets" aria-label="Modelos rápidos de range">
@@ -222,17 +162,14 @@ export default function VillainRangeSelector({
             <em>{availableCombinations.toLocaleString("pt-BR")} combos válidos com as cartas conhecidas</em>
           </div>
           <div className="range-modal-actions">
-            <button type="button" className="range-cancel-button" onClick={onCancel}>Cancelar</button>
-            <button
+            <Button type="button" className="range-cancel-button" variant="outline" onClick={onCancel}>Cancelar</Button>
+            <Button
               type="button"
               className="range-apply-button"
               disabled={selectedHands.length === 0 || availableCombinations === 0}
               onClick={() => onApply({ ...draftWeights })}
-            >Aplicar range</button>
+            >Aplicar range</Button>
           </div>
         </footer>
-      </div>
-    </div>,
-    document.body,
-  );
+  </Modal>;
 }

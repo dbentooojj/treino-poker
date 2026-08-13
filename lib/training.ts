@@ -133,6 +133,8 @@ export type TrainingSession = {
   targetQuestions: number | null;
   answeredQuestions: number;
   correctAnswers: number;
+  evDelta: number;
+  evUnit: EvUnit;
   exercise: TrainingExercise;
 };
 
@@ -165,6 +167,8 @@ export type TrainingReport = {
   correctAnswers: number;
   errors: number;
   accuracy: number;
+  evDelta: number | null;
+  evUnit: EvUnit | null;
   durationSeconds: number;
   averageSeconds: number | null;
   byPosition: ReportGroup[];
@@ -204,6 +208,14 @@ export function actionLabel(action: TrainingAction, node: Pick<TrainingExercise,
   if (node.trainingType === "OPEN_FOLD") return action.amountBb ? `Open ${formatBb(action.amountBb)} BB` : "Open raise";
   if (node.trainingType === "VS_OPEN") return action.amountBb ? `3-bet ${formatBb(action.amountBb)} BB` : "3-bet";
   return action.amountBb ? `Raise ${formatBb(action.amountBb)} BB` : "Raise";
+}
+
+export function resolvedActionLabel(value: TrainingAction | string, actions: TrainingAction[], node: Pick<TrainingExercise, "heroStackBb" | "trainingType">) {
+  const aliases = typeof value === "string" ? [value] : actionAliases(value);
+  const resolved = actions.find((action) => actionAliases(action).some((alias) => aliases.includes(alias)));
+  if (resolved) return actionLabel(resolved, node);
+  if (typeof value !== "string") return actionLabel(value, node);
+  return value;
 }
 
 export function formatBb(value: number) { return Number(value.toFixed(2)).toString(); }

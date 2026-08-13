@@ -43,12 +43,12 @@ export type UnifiedPokerTableProps = {
 export function UnifiedPokerTable({ seats, anchorPosition, phase, potBb = 0, board = [], muckCount = 0, collecting = false, showDeck = true, showChips = true, showSeatDetails = true, payout, className = "", ariaLabel = "Mesa de treinamento" }: UnifiedPokerTableProps) {
   const orderedSeats = rotateSeatsToAnchor(seats, anchorPosition);
   const coordinates = tableSeatCoordinates(orderedSeats.length);
-  return <div className={`play-table-frame unified-training-table play-phase-${phase.toLowerCase()} ${className}`} data-seat-count={orderedSeats.length} aria-label={ariaLabel}>
+  return <div className={`play-table-frame unified-training-table play-phase-${phase.toLowerCase()} ${className}`} data-seat-count={orderedSeats.length} role="group" aria-label={ariaLabel}>
     <div className="play-table-rail">
       <div className="play-table-felt">
         <div className="play-felt-mark" aria-hidden="true">RANGELAB</div>
-        {showDeck && <div className="play-deck" aria-label="Baralho"><i/><i/><span>R</span></div>}
-        <div className="play-muck" aria-label={`${muckCount} folds no muck`}>
+        {showDeck && <div className="play-deck" role="img" aria-label="Baralho"><i/><i/></div>}
+        <div className="play-muck" role="img" aria-label={`${muckCount} folds no muck`}>
           {Array.from({ length: Math.min(muckCount, 7) }, (_, index) => <i style={{ "--muck-index": index } as React.CSSProperties} key={index}/>) }
         </div>
         {showChips && <PotDisplay amountBb={potBb}/>}
@@ -74,7 +74,7 @@ function UnifiedPokerSeat({ seat, slot, coordinate, showDetails }: { seat: Unifi
   const visibleCards = seat.visibleCards ?? cards.length;
   const style = { "--table-seat-x": `${coordinate[0]}%`, "--table-seat-y": `${coordinate[1]}%` } as React.CSSProperties;
   return <div style={style} className={`play-seat play-seat-${slot} ${seat.hero ? "play-seat--hero" : ""} ${seat.active ? "play-seat--active" : ""} ${seat.winner ? "play-seat--winner" : ""} ${seat.folded && !seat.mucking ? "play-seat--folded" : ""} ${seat.mucking ? "play-seat--mucking" : ""}`} data-position={seat.position} data-hero={seat.hero || undefined}>
-    <div className="play-hole-cards" aria-label={`Cartas de ${seat.hero ? `${seat.position}, Hero` : seat.position}`}>
+    <div className="play-hole-cards" role="group" aria-label={`Cartas de ${seat.hero ? `${seat.position}, Hero` : seat.position}`}>
       {showCards && cards.slice(0, visibleCards).map((card, cardIndex) => <PlayingCard key={`${card.rank}${card.suit}-${cardIndex}`} card={card} compact faceDown={!seat.cardsVisible} animate/>)}
     </div>
     <div className="play-player-box">

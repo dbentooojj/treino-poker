@@ -14,6 +14,9 @@ import {
 } from "../../lib/poker/range";
 import type { PokerStreet } from "../../lib/poker/street";
 import type { EquityWorkerRequest, EquityWorkerResponse } from "../../workers/equity.worker";
+import { Button } from "../ui/Button";
+import { Icon } from "../ui/Icon";
+import { SegmentedControl, StatusMessage } from "../ui/Primitives";
 import CardPicker from "./CardPicker";
 import PlayingCard from "./PlayingCard";
 import VillainRangeSelector from "./VillainRangeSelector";
@@ -63,6 +66,7 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
   const [board, setBoard] = useState<Array<PokerCard | null>>([null, null, null, null, null]);
   const [active, setActive] = useState<SlotTarget>({ zone: "hero", index: 0 });
   const [error, setError] = useState<string | null>(null);
+  const [calculating, setCalculating] = useState(false);
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
 
@@ -98,6 +102,7 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
     requestIdRef.current += 1;
     workerRef.current?.terminate();
     workerRef.current = null;
+    setCalculating(false);
     setError(null);
     onEquityChange(null);
     onResultChange(null);
@@ -108,12 +113,14 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
 
     const requestId = ++requestIdRef.current;
     const timer = window.setTimeout(() => {
+      setCalculating(true);
       const worker = new Worker(new URL("../../workers/equity.worker.ts", import.meta.url), { type: "module" });
       workerRef.current = worker;
       worker.onmessage = ({ data }: MessageEvent<EquityWorkerResponse>) => {
         if (data.requestId !== requestId || requestId !== requestIdRef.current) return;
         worker.terminate();
         workerRef.current = null;
+        setCalculating(false);
         if (data.ok) {
           onEquityChange(data.result.heroEquity);
           onResultChange(data.result);
@@ -124,6 +131,7 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
       worker.onerror = () => {
         if (requestId !== requestIdRef.current) return;
         setError("Não foi possível concluir o cálculo local.");
+        setCalculating(false);
         worker.terminate();
         workerRef.current = null;
       };
@@ -246,14 +254,14 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
     onRemove={() => updateSlot({ zone, index }, null)}
   />;
 
-  return <article className="poker-tool-card equity-calculator-card simplified-equity-card">
+  return <article className="poker-tool-card equity-calculator-card simplified-equity-card" aria-busy={calculating || undefined}>
     <div className="tool-card-heading">
       <span className="tool-icon" aria-hidden="true">▦</span>
       <div className="tool-card-title"><h2>Calculadora de Equity</h2><p>Veja quanto cada mão realiza.</p></div>
       <div className="equity-heading-actions">
-        <span className="live-analysis-badge"><i aria-hidden="true" /> Atualização automática</span>
-        {opponentMode === "exact" && <button type="button" className="secondary-tool-button" disabled={villainCards.length !== 2 || heroCards.length !== 2} onClick={swapHands}><span aria-hidden="true">⇄</span> Trocar</button>}
-        <button type="button" className="secondary-tool-button" onClick={clearCards}><span aria-hidden="true">↻</span> Limpar</button>
+        <span className="live-analysis-badge" role="status"><i aria-hidden="true" /> {calculating ? "Calculando…" : "Atualização automática"}</span>
+        {opponentMode === "exact" && <Button type="button" variant="outline" size="sm" disabled={villainCards.length !== 2 || heroCards.length !== 2} onClick={swapHands}><span aria-hidden="true">⇄</span> Trocar</Button>}
+        <Button type="button" variant="outline" size="sm" onClick={clearCards}><Icon name="refresh"/>Limpar</Button>
       </div>
     </div>
 
@@ -275,10 +283,7 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
               <small>{validRangeCombinations.toLocaleString("pt-BR")} válidos</small>
               <button type="button" aria-label="Editar range do Vilão" onClick={() => setRangeModalOpen(true)}>Editar</button>
             </div>}
-          <div className="opponent-mode-switch" aria-label="Modo do Vilão">
-            <button type="button" className={opponentMode === "exact" ? "active" : ""} aria-pressed={opponentMode === "exact"} onClick={() => changeOpponentMode("exact")}>Mão exata</button>
-            <button type="button" className={opponentMode === "range" ? "active" : ""} aria-pressed={opponentMode === "range"} onClick={() => changeOpponentMode("range")}>Range</button>
-          </div>
+          <SegmentedControl className="opponent-mode-switch-system" label="Modo do Vilão" value={opponentMode} onChange={changeOpponentMode} options={[{ value: "exact", label: "Mão exata" }, { value: "range", label: "Range" }] as const}/>
         </div>
       </section>
 
@@ -309,7 +314,7 @@ export default function EquityCalculator({ onEquityChange, onResultChange, onStr
       onSelect={(card) => updateSlot(active, card)}
     />
 
-    {error && <p className="calculator-error" role="alert">{error}</p>}
+    {error && <StatusMessage className="calculator-status" tone="error">{error}</StatusMessage>}
     {opponentMode === "range" && rangeModalOpen && <VillainRangeSelector
       selectedWeights={villainRangeWeights}
       blockedCards={[...heroCards, ...boardCards]}

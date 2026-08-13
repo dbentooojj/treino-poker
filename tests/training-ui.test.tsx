@@ -63,8 +63,9 @@ test("renderiza a quantidade correta de seats em heads-up, 6-max e 9-max", () =>
   for (const playersCount of [2, 6, 9]) {
     const heroPosition = positionNames(playersCount).at(-1)!;
     const markup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(playersCount, [fold, allIn], heroPosition)} busy={false} onChoose={() => undefined}/>);
-    assert.match(markup, new RegExp(`data-seat-count="${playersCount}"`));
-    assert.equal((markup.match(/data-position=/g) ?? []).length, playersCount);
+    const visibleSeats = playersCount === 9 ? 8 : playersCount;
+    assert.match(markup, new RegExp(`data-seat-count="${visibleSeats}"`));
+    assert.equal((markup.match(/data-position=/g) ?? []).length, visibleSeats);
     assert.match(markup, /style="--table-seat-x:50%;--table-seat-y:100%" class="play-seat play-seat-1 play-seat--hero/);
   }
 });
@@ -116,6 +117,8 @@ test("relatório diferencia totais completos de detalhes recentes limitados", ()
     correctAnswers: 999,
     errors: 2,
     accuracy: 100,
+    evDelta: -0.25,
+    evUnit: "BIG_BLINDS",
     durationSeconds: 1_001,
     averageSeconds: 1,
     byPosition: [],
@@ -126,7 +129,9 @@ test("relatório diferencia totais completos de detalhes recentes limitados", ()
     feedback: [],
   }} onExit={() => undefined} onStarted={() => undefined}/>);
   assert.match(markup, /Os totais cobrem a sessão completa/);
-  assert.match(markup, /Revisar erros recentes \(até 100\)/);
+  assert.match(markup, /Revisar erros/);
+  assert.match(markup, /Resultado do treino/);
+  assert.doesNotMatch(markup, /ANÁLISE COMPLETA DA SESSÃO/);
 });
 
 test("drill avança sem revelar a solução e concentra a análise no relatório", async () => {
@@ -134,7 +139,17 @@ test("drill avança sem revelar a solução e concentra a análise no relatório
   assert.doesNotMatch(trainerSource, /import \{ TrainingFeedback \}/);
   assert.match(trainerSource, /setFeedback\(\{ answer: data\.answer/);
   assert.match(trainerSource, /setExercise\(feedback\.nextExercise\)/);
-  assert.match(trainerSource, /ANÁLISE COMPLETA DA SESSÃO/);
+  assert.match(trainerSource, /Mapa de EV das mãos/);
+  assert.match(trainerSource, /RangeMatrix/);
+  assert.match(trainerSource, /report-spot-strip/);
+  assert.match(trainerSource, /reportSpotSequence/);
+  assert.doesNotMatch(trainerSource, /Ver análises adicionais/);
+
+  const rangeSource = await readFile(new URL("../components/training/RangeMatrix.tsx", import.meta.url), "utf8");
+  assert.match(rangeSource, /EV positivo/);
+  assert.match(rangeSource, /EV neutro/);
+  assert.match(rangeSource, /EV negativo/);
+  assert.match(rangeSource, /rangeCellColor\(bestEv\)/);
 
   const decisionMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} onChoose={() => undefined}/>);
   assert.match(decisionMarkup, /unified-training-table/);
@@ -148,34 +163,41 @@ test("drill avança sem revelar a solução e concentra a análise no relatório
 
   const feedbackMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} feedback={{ answer: { correct: false, selectedKey: "fold", bestKey: "call", bestLabel: "Call", strategy: { fold: 0, call: 1 }, evs: { fold: 0, call: 1 }, decisionClarity: 1, isMixed: false }, selectedKey: "fold" }} onChoose={() => undefined} onRepeat={() => undefined} onNext={() => undefined}/>);
   assert.match(feedbackMarkup, /RESULTADO DO SPOT/);
+  assert.match(feedbackMarkup, /data-tone="review"/);
   assert.match(feedbackMarkup, /REVISAR DECISÃO/);
   assert.match(feedbackMarkup, /Repetir spot/);
   assert.match(feedbackMarkup, /Próximo spot/);
 });
 
 test("spots e mão completa usam os mesmos componentes visuais", async () => {
-  const [spot, table, action, result] = await Promise.all([
+  const [spot, table, action, result, styles] = await Promise.all([
     readFile(new URL("../components/training/TrainingDecision.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/play/PokerTable.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/play/ActionPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/play/HandResult.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
   for (const shared of ["UnifiedPokerTable", "UnifiedActionPanel", "UnifiedResultPanel"]) assert.match(spot, new RegExp(shared));
   assert.match(table, /UnifiedPokerTable/);
   assert.match(action, /UnifiedActionPanel/);
   assert.match(result, /UnifiedResultPanel/);
   assert.doesNotMatch(spot, /<div className="play-table-rail"|<div className="play-player-box"/);
+  assert.match(styles, /\.play-action-button:hover:not\(:disabled\)[^{]*\{[^}]*filter:brightness\(1\.1\) saturate\(1\.06\)/);
+  assert.doesNotMatch(styles, /\.play-action-button:hover(?:not\(:disabled\))?[^\{]*\{[^}]*(?:background|background-color):/);
+  assert.match(styles, /\.report-decision-browser>div[^\{]*\{[^}]*overflow-y:scroll/);
 });
 
 test("treinar mantém mão completa indisponível sem cenários demonstrativos", async () => {
-  const [header, legacyPlay, workspace, trainer, playTrainer] = await Promise.all([
+  const [header, appHeader, legacyPlay, workspace, trainer, playTrainer] = await Promise.all([
     readFile(new URL("../app/member-header.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ui/AppHeader.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/jogar/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/treinar/training-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/play/PlayTrainer.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(header, /href="\/treinar">Treinar/);
+  assert.match(header, /<AppHeader/);
+  assert.match(appHeader, /href: "\/treinar", label: "Treinar"/);
   assert.match(legacyPlay, /redirect\("\/treinar"\)/);
   assert.doesNotMatch(workspace, /PlayTrainer|fullHandScenarios|MOCK_HANDS|cenários demonstrativos/);
   assert.doesNotMatch(workspace, /Novo drill|ÁREA DE TREINO/);
@@ -185,8 +207,13 @@ test("treinar mantém mão completa indisponível sem cenários demonstrativos",
   assert.match(playTrainer, /scenarios: readonly PlayableHandScenario\[\]/);
   assert.doesNotMatch(playTrainer, /MOCK_HANDS|MTT · ChipEV/);
   assert.match(trainer, /className="inline-training-session"/);
+  assert.match(trainer, /className="spot-session-sidebar"/);
+  for (const label of ["Sessão atual", "Progresso", "Acerto", "Corretas", "Erros", "Tempo de treino"]) assert.match(trainer, new RegExp(label));
+  assert.doesNotMatch(trainer, /EV do treino/);
+  assert.doesNotMatch(trainer, /className="spot-session-toolbar"/);
   assert.doesNotMatch(trainer, /training-screen training-screen-redesigned/);
-  for (const label of ["Modelo", "Modo de treino", "Decisão", "Mão completa", "Em desenvolvimento", "Ação pré-flop", "Qualquer", "Todas as configurações", "Iniciar treino"]) assert.match(trainer, new RegExp(label));
+  for (const label of ["Modelo", "Modo de treino", "Decisão", "Mão completa", "Ação pré-flop", "Qualquer", "Todas as configurações", "Iniciar treino"]) assert.match(trainer, new RegExp(label));
+  assert.doesNotMatch(trainer, /Mão completa · Em desenvolvimento/);
   for (const removed of ["Solutions", "Starting spot", "Preflop action", "All settings", "Start training", "From start"]) assert.doesNotMatch(trainer, new RegExp(removed));
   assert.match(trainer, /options\.trainingTypes\.length > 0/);
   assert.match(trainer, /trainingType: filters\.trainingType \?\? null/);
@@ -232,6 +259,10 @@ test("prévia 9-max omite UTG+2 e usa a geometria visual de oito assentos", () =
   for (const position of ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"]) {
     assert.match(markup, new RegExp(`data-position="${position.replace("+", "\\+")}"`));
   }
+
+  const activeMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(9, [fold, call], "CO")} busy={false} onChoose={() => undefined}/>);
+  assert.match(activeMarkup, /data-seat-count="8"/);
+  assert.doesNotMatch(activeMarkup, /data-position="UTG\+2"/);
 });
 
 function makeExercise(playersCount: number, availableActions: TrainingAction[], heroPosition = "BB"): TrainingExercise {

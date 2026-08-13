@@ -5,8 +5,10 @@ import {
   MAX_EXERCISE_QUEUE_SIZE,
   actionAliases,
   actionKey,
+  resolvedActionLabel,
   evaluateChoice,
   fisherYates,
+  recordValue,
   sameQueueEntry,
   type AnswerEvaluation,
   type NodeRange,
@@ -21,6 +23,7 @@ import {
   type TrainingSession,
   type TrainingType,
   type EquityModel,
+  type EvUnit,
 } from "../lib/training";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
@@ -148,7 +151,7 @@ export async function createTrainingSession(userId: string, request: SessionStar
     }
     throw error;
   }
-  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, exercise };
+  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
 }
 
 export async function answerTrainingSession(userId: string, input: AnswerTrainingInput) {
@@ -257,6 +260,7 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
   if (!entry) throw new TrainingSessionStateError("A sessão ativa não possui uma pergunta retomável.");
   const exercise = await getExercise(entry);
   if (!exercise) throw new TrainingSessionStateError("A pergunta atual da sessão não está mais disponível.");
+  const evMetric = await getTrainingSessionEv(session.id, exercise.evUnit);
   return {
     id: session.id,
     startedAt: session.startedAt.getTime(),
@@ -264,8 +268,28 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
     targetQuestions: session.targetQuestions,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    evDelta: evMetric.value,
+    evUnit: evMetric.unit,
     exercise,
   };
+}
+
+async function getTrainingSessionEv(sessionId: string, fallbackUnit: EvUnit) {
+  const answers = await getDb().select({
+    selectedAction: trainingAnswers.selectedAction,
+    bestAction: trainingAnswers.bestAction,
+    evs: trainingAnswers.evs,
+    evUnit: trainingAnswers.evUnit,
+  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, sessionId));
+  let value = 0;
+  let unit = fallbackUnit;
+  for (const answer of answers) {
+    const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
+    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    if (selectedEv !== null && Number.isFinite(bestEv)) value += selectedEv - bestEv;
+    unit = answer.evUnit;
+  }
+  return { value, unit };
 }
 
 export async function finishTrainingSession(userId: string, sessionId: string) {
@@ -296,8 +320,30 @@ export async function getTrainingReport(userId: string, sessionId: string): Prom
     strategy: trainingAnswers.strategy,
     evs: trainingAnswers.evs,
     evUnit: trainingAnswers.evUnit,
-  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(asc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
+    trainingType: trainingNodes.trainingType,
+    heroStackBb: trainingNodes.heroStackBb,
+    availableActions: trainingNodes.availableActions,
+  }).from(trainingAnswers)
+    .innerJoin(trainingNodes, eq(trainingNodes.id, trainingAnswers.trainingNodeId))
+    .where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(asc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
   return buildReport(session, answers);
+}
+
+export async function getTrainingReportSpot(userId: string, sessionId: string, questionIndex: number) {
+  const session = await ownedSession(userId, sessionId);
+  if (!session || !session.endedAt) throw new TrainingSessionStateError("Relatório indisponível para esta sessão.");
+  const [answer] = await getDb().select({
+    trainingSetId: trainingAnswers.trainingSetId,
+    trainingNodeId: trainingAnswers.trainingNodeId,
+    trainingHandId: trainingAnswers.trainingHandId,
+  }).from(trainingAnswers).where(and(
+    eq(trainingAnswers.trainingSessionId, sessionId),
+    eq(trainingAnswers.questionIndex, questionIndex),
+  )).limit(1);
+  if (!answer) throw new TrainingSessionStateError("Decisão não encontrada neste relatório.");
+  const [exercise, range] = await Promise.all([getExercise(answer), getNodeRange(answer)]);
+  if (!exercise || !range) throw new TrainingSessionStateError("Os dados de EV deste spot não estão disponíveis.");
+  return { exercise, range };
 }
 
 async function selectEligibleTrainingSet(filters: TrainingQueryFilters) {
@@ -539,7 +585,9 @@ function sameConfig(left: TrainingConfig, right: TrainingConfig) {
     && left.targetQuestions === right.targetQuestions;
 }
 
-function buildReport(session: typeof trainingSessions.$inferSelect, answers: Array<{ questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"] }>): TrainingReport {
+type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; trainingType: TrainingType; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
+
+function buildReport(session: typeof trainingSessions.$inferSelect, answers: ReportAnswerRow[]): TrainingReport {
   const answered = session.answeredQuestions;
   const correct = session.correctAnswers;
   const accuracy = answered ? Math.round(correct / answered * 100) : 0;
@@ -549,6 +597,7 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Arr
   const missed = new Map<string, number>();
   for (const answer of answers) if (!answer.isCorrect) missed.set(answer.handClass, (missed.get(answer.handClass) ?? 0) + 1);
   const mostMissedHands = [...missed].map(([handClass, errors]) => ({ handClass, errors })).sort((left, right) => right.errors - left.errors || left.handClass.localeCompare(right.handClass)).slice(0, 8);
+  const evMetric = reportEvMetric(answers);
   const feedback: string[] = [];
   if (answered >= 5 && accuracy >= 80) feedback.push(`Bom desempenho geral: ${accuracy}% de acerto.`);
   const comparablePositions = byPosition.filter((group) => group.answered >= 3);
@@ -577,19 +626,21 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Arr
     correctAnswers: correct,
     errors: answered - correct,
     accuracy,
+    evDelta: evMetric?.value ?? null,
+    evUnit: evMetric?.unit ?? null,
     durationSeconds: session.durationSeconds,
     averageSeconds: answered ? Number((session.durationSeconds / answered).toFixed(1)) : null,
     byPosition,
     byDecisionType,
     mostMissedHands,
-    errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: selectedActionLabel(answer.selectedAction), bestAction: answer.bestAction })),
+    errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: reportAnswerActionLabel(answer, answer.selectedAction), bestAction: reportAnswerActionLabel(answer, answer.bestAction) })),
     decisionDetails: answers.map((answer) => ({
       questionIndex: answer.questionIndex,
       handClass: answer.handClass,
       heroPosition: answer.heroPosition,
-      selectedAction: selectedActionLabel(answer.selectedAction),
+      selectedAction: reportAnswerActionLabel(answer, answer.selectedAction),
       selectedKey: actionKey(answer.selectedAction as TrainingAction),
-      bestAction: answer.bestAction,
+      bestAction: reportAnswerActionLabel(answer, answer.bestAction),
       isCorrect: answer.isCorrect,
       isMixed: Boolean(answer.isMixed),
       strategy: answer.strategy,
@@ -618,6 +669,8 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     correctAnswers: correct,
     errors: answered - correct,
     accuracy: answered ? Math.round(correct / answered * 100) : 0,
+    evDelta: null,
+    evUnit: null,
     durationSeconds: session.durationSeconds,
     averageSeconds: answered ? Number((session.durationSeconds / answered).toFixed(1)) : null,
     byPosition: [],
@@ -627,6 +680,20 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     decisionDetails: [],
     feedback: ["Resumo histórico: detalhes por mão não estavam disponíveis nesta versão."],
   };
+}
+
+function reportEvMetric(answers: Array<{ selectedAction: Record<string, unknown>; bestAction: string; evs: Record<string, number>; evUnit: EvUnit }>) {
+  if (!answers.length) return null;
+  let value = 0;
+  const unit = answers[0].evUnit;
+  for (const answer of answers) {
+    if (answer.evUnit !== unit) return null;
+    const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
+    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    if (selectedEv === null || !Number.isFinite(bestEv)) continue;
+    value += selectedEv - bestEv;
+  }
+  return { value, unit };
 }
 
 function groupAnswers<T>(answers: T[], label: (answer: T) => string) {
@@ -641,8 +708,11 @@ function groupAnswers<T>(answers: T[], label: (answer: T) => string) {
   return [...groups].map(([groupLabel, values]) => ({ label: groupLabel, ...values, accuracy: Math.round(values.correct / values.answered * 100) })).sort((left, right) => positionRank(left.label) - positionRank(right.label) || left.label.localeCompare(right.label));
 }
 
-function selectedActionLabel(action: Record<string, unknown>) {
-  return typeof action.label === "string" ? action.label : typeof action.id === "string" ? action.id : typeof action.type === "string" ? action.type : "—";
+function reportAnswerActionLabel(answer: ReportAnswerRow, value: Record<string, unknown> | string) {
+  return resolvedActionLabel(value as TrainingAction | string, answer.availableActions as TrainingAction[], {
+    heroStackBb: answer.heroStackBb,
+    trainingType: answer.trainingType,
+  });
 }
 
 function elapsedSeconds(startedAt: Date) { return Math.max(0, Math.round((Date.now() - startedAt.getTime()) / 1000)); }

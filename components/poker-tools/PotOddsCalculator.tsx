@@ -5,6 +5,7 @@ import type { EquityResult as EquityResultData } from "../../lib/poker/equity";
 import { deriveStreetDecision, parsePokerAmount, STREET_LABELS, type PokerStreet } from "../../lib/poker/street";
 import EquityResult from "./EquityResult";
 import type { MoneyUnit } from "./PokerToolsExperience";
+import { SegmentedControl } from "../ui/Primitives";
 
 type Decision = "positive" | "negative" | "neutral";
 
@@ -107,15 +108,7 @@ export default function PotOddsCalculator({
     <article className="poker-tool-card pot-odds-card simplified-pot-odds-card">
       <div className="analysis-card-heading">
         <div><span className="tool-icon gold" aria-hidden="true">%</span><h2>Pot Odds <small>· {streetLabel}</small></h2></div>
-        <div className="unit-switch" aria-label="Unidade dos valores">
-          {(["BB", "R$"] as const).map((option) => <button
-            type="button"
-            key={option}
-            aria-pressed={unit === option}
-            className={unit === option ? "active" : ""}
-            onClick={() => onUnitChange(option)}
-          >{option}</button>)}
-        </div>
+        <SegmentedControl label="Unidade dos valores" value={unit} onChange={onUnitChange} options={[{ value: "BB", label: "BB" }, { value: "R$", label: "R$" }] as const}/>
       </div>
 
       <div className="pot-inputs simplified-pot-inputs">

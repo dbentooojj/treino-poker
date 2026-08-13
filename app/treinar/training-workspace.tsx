@@ -62,7 +62,7 @@ export default function TrainingWorkspace({ user }: { user: AuthUser }) {
     setReport(null);
   }
 
-  if (report) return <TrainingReportView report={report} onExit={leaveTraining} onStarted={rememberTraining}/>;
+  if (report) return <TrainingReportView report={report} user={user} onExit={leaveTraining} onStarted={rememberTraining}/>;
 
   return <main className={`member-shell training-hub-shell spot-mode ${session ? "spot-session-mode" : ""}`}>
     <MemberHeader user={user} active="training"/>

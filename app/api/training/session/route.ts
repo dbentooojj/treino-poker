@@ -8,6 +8,7 @@ import {
   finishTrainingSession,
   getActiveTrainingSession,
   getTrainingReport,
+  getTrainingReportSpot,
   type SessionStartRequest,
 } from "../../../../db/training";
 import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingType, type TrainingConfig } from "../../../../lib/training";
@@ -24,6 +25,12 @@ export async function GET(request: Request) {
     }
     const sessionId = searchParams.get("id");
     if (!validId(sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
+    const rangeQuestion = searchParams.get("rangeQuestion");
+    if (rangeQuestion !== null) {
+      const questionIndex = Number(rangeQuestion);
+      if (!Number.isSafeInteger(questionIndex) || questionIndex < 0) return Response.json({ error: "Decisão inválida." }, { status: 400 });
+      return Response.json({ spot: await getTrainingReportSpot(user.id, sessionId, questionIndex) }, noStore());
+    }
     const activeSession = await getActiveTrainingSession(user.id, sessionId);
     if (activeSession) return Response.json({ session: activeSession }, noStore());
     return Response.json({ report: await getTrainingReport(user.id, sessionId) }, noStore());
@@ -67,6 +74,7 @@ export async function PATCH(request: Request) {
     return Response.json({
       answer: result.answer,
       answeredQuestions: result.answeredQuestions,
+      correctAnswers: result.correctAnswers,
       nextExercise: result.nextExercise,
       report: result.report,
       replayed: result.replayed,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, evaluateChoice, presentStrategy, rangeActionShares, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
+import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, evaluateChoice, presentStrategy, rangeActionShares, resolvedActionLabel, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
 
 const entries: QueueEntry[] = [
   { trainingSetId: "set-a", trainingNodeId: "btn", trainingHandId: "a7s" },
@@ -53,6 +53,14 @@ test("avaliação mantém best_action e rejeita ações inexistentes", () => {
   assert.equal(evaluateChoice("shove", actions, "shove", { fold: 0, shove: 2 })?.correct, true);
   assert.equal(evaluateChoice("fold", actions, "shove", { fold: 0, shove: 2 })?.correct, false);
   assert.equal(evaluateChoice("call", actions, "shove", { fold: 0, shove: 2 }), null);
+});
+
+test("converte identificadores HRC nos nomes reais das ações", () => {
+  const actions: TrainingAction[] = [{ id: "action-0", type: "FOLD" }, { id: "action-1", type: "CALL" }, { id: "action-2", type: "RAISE", amountBb: 6 }];
+  const context = { heroStackBb: 20, trainingType: "VS_OPEN" as const };
+  assert.equal(resolvedActionLabel("action-0", actions, context), "Fold");
+  assert.equal(resolvedActionLabel({ id: "action-1", type: "CALL" }, actions, context), "Call");
+  assert.equal(resolvedActionLabel("action-2", actions, context), "3-bet 6 BB");
 });
 
 test("avaliação aceita toda ação com frequência relevante em mixed strategies", () => {
