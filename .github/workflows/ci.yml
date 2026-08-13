@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  quality:
+    name: Testes, tipos, lint e build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Obter código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci --no-audit --no-fund
+
+      - name: Executar validações
+        run: npm test
+
+  integration:
+    name: Integração PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: rangelab-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      POSTGRES_DB: rangelab_ci
+      POSTGRES_USER: rangelab_ci
+      POSTGRES_PASSWORD: temporary-ci-password
+      APP_BASE_URL: https://rangelab-ci.example.test
+      SITE_ADDRESS: rangelab-ci.example.test
+      RESEND_API_KEY: temporary-ci-key
+      EMAIL_FROM: RangeLab CI <no-reply@example.test>
+    steps:
+      - name: Obter código
+        uses: actions/checkout@v4
+
+      - name: Executar integração PostgreSQL
+        run: docker compose --profile test run --rm --build integration
+
+      - name: Remover recursos temporários
+        if: always()
+        run: docker compose --profile test down --volumes --remove-orphans
