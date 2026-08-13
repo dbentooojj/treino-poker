@@ -15,6 +15,11 @@ export default function EquityResult({ result }: EquityResultProps) {
   const heroWinRate = percent(result.heroWinRate);
   const villainWinRate = percent(result.villainWinRate);
   const outs = result.outs === null ? "—" : result.outs.toLocaleString("pt-BR");
+  const outsLabel = result.outsOwner === "hero"
+    ? "Outs do Hero"
+    : result.outsOwner === "villain"
+      ? "Outs do Vilão"
+      : "Outs";
   const resultDescription = `Resultados: Hero vence ${heroWinRate}, empate ${tieRate}, Vilão vence ${villainWinRate}`;
 
   return <section
@@ -34,7 +39,7 @@ export default function EquityResult({ result }: EquityResultProps) {
     </div>
 
     <dl className="decision-outcomes">
-      <div className="outs"><dt>Outs</dt><dd>{outs}</dd></div>
+      <div className="outs"><dt>{outsLabel}</dt><dd>{outs}</dd></div>
       <div className="win"><dt>Vitória</dt><dd>{heroWinRate}</dd></div>
       <div className="loss"><dt>Derrota</dt><dd>{villainWinRate}</dd></div>
     </dl>

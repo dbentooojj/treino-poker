@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { PageContainer } from "../ui/Primitives";
 import type { EquityResult as EquityResultData } from "../../lib/poker/equity";
 import type { PokerStreet } from "../../lib/poker/street";
 import EquityCalculator from "./EquityCalculator";
@@ -16,7 +17,8 @@ export default function PokerToolsExperience() {
   const [betAmount, setBetAmount] = useState("");
   const [unit, setUnit] = useState<MoneyUnit>("BB");
 
-  return <section className="tools-content simplified-tools-content">
+  return <PageContainer className="tools-page">
+    <h1 className="sr-only">Ferramentas de poker</h1>
     <div className="poker-tools-grid simplified-tools-grid">
       <EquityCalculator
         onEquityChange={setHeroEquity}
@@ -35,5 +37,5 @@ export default function PokerToolsExperience() {
         onUnitChange={setUnit}
       />
     </div>
-  </section>;
+  </PageContainer>;
 }

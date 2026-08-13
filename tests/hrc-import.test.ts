@@ -178,6 +178,7 @@ test("rejeita cobertura, classes, vetores e frequências estratégicas inválida
     { name: "played longo", node: replaceHand(pushNode, "AA", { weight: 1, played: [0, 1, 0], evs: [0, 2.5] }) },
     { name: "EV curto", node: replaceHand(pushNode, "AA", { weight: 1, played: [0, 1], evs: [2.5] }) },
     { name: "EV longo", node: replaceHand(pushNode, "AA", { weight: 1, played: [0, 1], evs: [0, 2.5, 3] }) },
+    { name: "desvio maior que o arredondamento de quatro casas", node: replaceHand(pushNode, "AA", { weight: 1, played: [0.9998, 0], evs: [0, 2.5] }) },
     { name: "soma 160%", node: replaceHand(pushNode, "AA", { weight: 1, played: [0.8, 0.8], evs: [0, 2.5] }) },
     { name: "unidade percentual", node: replaceHand(pushNode, "AA", { weight: 1, played: [40, 60], evs: [0, 2.5] }) },
     { name: "peso acima de 1", node: replaceHand(pushNode, "AA", { weight: 1.01, played: [0, 1], evs: [0, 2.5] }) },
@@ -191,6 +192,34 @@ test("rejeita cobertura, classes, vetores e frequências estratégicas inválida
       })), HrcImportError);
     });
   }
+});
+
+test("aceita e normaliza o arredondamento de quatro casas dos exports HRC", async () => {
+  const roundedNode = {
+    ...pushNode,
+    children: 4,
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "C", amount: 100 },
+      { type: "R", amount: 300 },
+      { type: "R", amount: 1_000 },
+    ],
+    hands: strategyHands([0, 0, 0, 1], [0, 1, 2, 3]),
+  };
+  roundedNode.hands.J3o = { weight: 1, played: [0.9034, 0.007, 0.0897, 0], evs: [0, 1, 2, 3] };
+  roundedNode.hands["43s"] = { weight: 1, played: [0.0001, 0.999, 0, 0.0008], evs: [0, 1, 2, 3] };
+
+  const pack = await parseHrcPack(zipFile({
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(roundedNode),
+  }));
+
+  const j3o = pack.nodes[0].hands.J3o.played;
+  const fourThreeSuited = pack.nodes[0].hands["43s"].played;
+  assert.equal(j3o.reduce((sum, frequency) => sum + frequency, 0), 1);
+  assert.equal(fourThreeSuited.reduce((sum, frequency) => sum + frequency, 0), 1);
+  assert.deepEqual(j3o, [0.9034, 0.007, 0.0897, 0].map((frequency) => frequency / 1.0001));
+  assert.deepEqual(fourThreeSuited, [0.0001, 0.999, 0, 0.0008].map((frequency) => frequency / 0.9999));
 });
 
 test("normaliza apenas ruído numérico de borda sem preservar frequência ambígua", async () => {

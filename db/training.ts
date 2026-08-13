@@ -5,8 +5,10 @@ import {
   MAX_EXERCISE_QUEUE_SIZE,
   actionAliases,
   actionKey,
+  resolvedActionLabel,
   evaluateChoice,
   fisherYates,
+  recordValue,
   sameQueueEntry,
   type AnswerEvaluation,
   type NodeRange,
@@ -21,6 +23,7 @@ import {
   type TrainingSession,
   type TrainingType,
   type EquityModel,
+  type EvUnit,
 } from "../lib/training";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
@@ -33,6 +36,7 @@ const PUBLISHED_CONDITIONS: SQL[] = [
   eq(trainingSets.isPublished, true),
 ];
 const MAX_REPORT_ANSWER_DETAILS = 1_000;
+type TrainingQueryFilters = Omit<TrainingFilters, "trainingType"> & { trainingType?: TrainingType | null };
 
 export type SessionStartRequest =
   | { mode?: "START"; config: TrainingConfig }
@@ -55,12 +59,32 @@ export async function getTrainingOptions(filters: TrainingFilters): Promise<Trai
   const equityModels = await distinct<EquityModel>(trainingSets.equityModel, filters, ["trainingType"]);
   const stackDepthsBb = await distinct<number>(trainingNodes.heroStackBb, filters, ["trainingType", "equityModel"]);
   const heroPositions = await distinct<string>(trainingNodes.heroPosition, filters, ["trainingType", "equityModel", "stackDepthBb"]);
-  const [match] = await getDb().select({ available: sql<number>`1` }).from(trainingHands)
+  const [match] = await getDb().select({
+    trainingSetId: trainingSets.id,
+    studyName: sql<string>`COALESCE(${trainingSets.displayName}, ${trainingSets.name})`,
+    gameType: trainingSets.gameType,
+    equityModel: trainingSets.equityModel,
+    playersCount: trainingSets.playersCount,
+    heroStackBb: trainingNodes.heroStackBb,
+    heroPosition: trainingNodes.heroPosition,
+    actionSequence: trainingNodes.actionSequence,
+  }).from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
     .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
     .where(and(...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
+    .orderBy(asc(trainingSets.displayOrder), asc(trainingSets.importedAt), asc(trainingSets.id), asc(trainingNodes.id), asc(trainingHands.id))
     .limit(1);
-  return { trainingTypes, equityModels, stackDepthsBb, heroPositions: sortPositions(heroPositions), hasMatches: Boolean(match) };
+  return {
+    trainingTypes,
+    equityModels,
+    stackDepthsBb,
+    heroPositions: sortPositions(heroPositions),
+    hasMatches: Boolean(match),
+    tableContext: match ? {
+      ...match,
+      actionSequence: match.actionSequence as TrainingSequenceAction[],
+    } : null,
+  };
 }
 
 export async function createTrainingSession(userId: string, request: SessionStartRequest): Promise<TrainingSession> {
@@ -78,27 +102,26 @@ export async function createTrainingSession(userId: string, request: SessionStar
     previousQueue = source.exerciseQueue;
     if (request.mode === "REVIEW_ERRORS") {
       if (!source.answerDetailsAvailable) throw new NoReviewErrorsError("Os detalhes por mão deste resumo histórico não estão disponíveis para revisão.");
-      const selectedSetId = source.trainingSetId ?? await getReviewSetId(source.id);
-      if (!selectedSetId) throw new NoReviewErrorsError("Nenhum erro para revisar.");
-      selectedSet = await getTrainingSetContext(selectedSetId);
+      const selectedSetId = config.trainingType === null ? undefined : source.trainingSetId ?? await getReviewSetId(source.id);
+      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : null;
       entries = await getReviewEntries(source.id, selectedSetId);
       if (!entries.length) throw new NoReviewErrorsError("Nenhum erro para revisar.");
       config = { ...config, targetQuestions: entries.length };
     } else {
-      const selectedSetId = source.trainingSetId ?? source.exerciseQueue[0]?.trainingSetId;
-      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : await selectEligibleTrainingSet(config);
-      entries = selectedSet ? await getEligibleEntries(config, selectedSet.id) : [];
+      const selectedSetId = config.trainingType === null ? undefined : source.trainingSetId ?? source.exerciseQueue[0]?.trainingSetId;
+      selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : config.trainingType === null ? null : await selectEligibleTrainingSet(config);
+      entries = await getEligibleEntries(config, selectedSet?.id);
     }
   } else if ("config" in request) {
     config = request.config;
-    selectedSet = await selectEligibleTrainingSet(config);
-    entries = selectedSet ? await getEligibleEntries(config, selectedSet.id) : [];
+    selectedSet = config.trainingType === null ? null : await selectEligibleTrainingSet(config);
+    entries = await getEligibleEntries(config, selectedSet?.id);
   } else {
     throw new TrainingSessionStateError("Configuração de sessão inválida.");
   }
 
   if (!entries.length) throw new NoExercisesError("Nenhum exercício disponível para estes filtros.");
-  if (!selectedSet) throw new NoExercisesError("O estudo selecionado não está mais disponível.");
+  if (config.trainingType !== null && !selectedSet) throw new NoExercisesError("O estudo selecionado não está mais disponível.");
   const queue = buildExerciseQueue(entries, config.targetQuestions, Math.random, previousQueue);
   const exercise = await getExercise(queue[0]);
   if (!exercise) throw new NoExercisesError("O exercício selecionado não está mais disponível.");
@@ -108,10 +131,10 @@ export async function createTrainingSession(userId: string, request: SessionStar
     await getDb().insert(trainingSessions).values({
       id,
       userId,
-      trainingSetId: selectedSet.id,
+      trainingSetId: selectedSet?.id ?? null,
       trainingType: config.trainingType,
       equityModel: config.equityModel,
-      playersCount: selectedSet.playersCount,
+      playersCount: selectedSet?.playersCount ?? null,
       stackBb: config.stackDepthBb ?? null,
       heroPosition: config.heroPosition ?? null,
       targetQuestions: config.targetQuestions,
@@ -128,7 +151,7 @@ export async function createTrainingSession(userId: string, request: SessionStar
     }
     throw error;
   }
-  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, exercise };
+  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
 }
 
 export async function answerTrainingSession(userId: string, input: AnswerTrainingInput) {
@@ -157,7 +180,8 @@ export async function answerTrainingSession(userId: string, input: AnswerTrainin
   let nextPosition = session.queuePosition + 1;
 
   if (!completed && nextPosition >= nextQueue.length) {
-    const eligible = await getEligibleEntries(sessionConfig(session), session.trainingSetId ?? entry.trainingSetId);
+    const continuedConfig = sessionConfig(session);
+    const eligible = await getEligibleEntries(continuedConfig, continuedConfig.trainingType === null ? undefined : session.trainingSetId ?? entry.trainingSetId);
     if (!eligible.length) throw new TrainingSessionStateError("Não há exercícios para continuar o treino livre.");
     nextQueue = buildExerciseQueue(eligible, null);
     if (nextQueue.length > 1 && sameQueueEntry(entry, nextQueue[0])) [nextQueue[0], nextQueue[1]] = [nextQueue[1], nextQueue[0]];
@@ -236,6 +260,7 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
   if (!entry) throw new TrainingSessionStateError("A sessão ativa não possui uma pergunta retomável.");
   const exercise = await getExercise(entry);
   if (!exercise) throw new TrainingSessionStateError("A pergunta atual da sessão não está mais disponível.");
+  const evMetric = await getTrainingSessionEv(session.id, exercise.evUnit);
   return {
     id: session.id,
     startedAt: session.startedAt.getTime(),
@@ -243,8 +268,28 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
     targetQuestions: session.targetQuestions,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    evDelta: evMetric.value,
+    evUnit: evMetric.unit,
     exercise,
   };
+}
+
+async function getTrainingSessionEv(sessionId: string, fallbackUnit: EvUnit) {
+  const answers = await getDb().select({
+    selectedAction: trainingAnswers.selectedAction,
+    bestAction: trainingAnswers.bestAction,
+    evs: trainingAnswers.evs,
+    evUnit: trainingAnswers.evUnit,
+  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, sessionId));
+  let value = 0;
+  let unit = fallbackUnit;
+  for (const answer of answers) {
+    const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
+    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    if (selectedEv !== null && Number.isFinite(bestEv)) value += selectedEv - bestEv;
+    unit = answer.evUnit;
+  }
+  return { value, unit };
 }
 
 export async function finishTrainingSession(userId: string, sessionId: string) {
@@ -265,17 +310,43 @@ export async function getTrainingReport(userId: string, sessionId: string): Prom
   if (!session || !session.endedAt || !session.completionReason) throw new TrainingSessionStateError("Relatório indisponível para esta sessão.");
   if (!session.answerDetailsAvailable) return buildLegacyReport(session);
   const answers = await getDb().select({
+    questionIndex: trainingAnswers.questionIndex,
     handClass: trainingAnswers.handClass,
     heroPosition: trainingAnswers.heroPosition,
     selectedAction: trainingAnswers.selectedAction,
     bestAction: trainingAnswers.bestAction,
     isCorrect: trainingAnswers.isCorrect,
     isMixed: trainingAnswers.isMixed,
-  }).from(trainingAnswers).where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(desc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
+    strategy: trainingAnswers.strategy,
+    evs: trainingAnswers.evs,
+    evUnit: trainingAnswers.evUnit,
+    trainingType: trainingNodes.trainingType,
+    heroStackBb: trainingNodes.heroStackBb,
+    availableActions: trainingNodes.availableActions,
+  }).from(trainingAnswers)
+    .innerJoin(trainingNodes, eq(trainingNodes.id, trainingAnswers.trainingNodeId))
+    .where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(asc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
   return buildReport(session, answers);
 }
 
-async function selectEligibleTrainingSet(filters: TrainingFilters) {
+export async function getTrainingReportSpot(userId: string, sessionId: string, questionIndex: number) {
+  const session = await ownedSession(userId, sessionId);
+  if (!session || !session.endedAt) throw new TrainingSessionStateError("Relatório indisponível para esta sessão.");
+  const [answer] = await getDb().select({
+    trainingSetId: trainingAnswers.trainingSetId,
+    trainingNodeId: trainingAnswers.trainingNodeId,
+    trainingHandId: trainingAnswers.trainingHandId,
+  }).from(trainingAnswers).where(and(
+    eq(trainingAnswers.trainingSessionId, sessionId),
+    eq(trainingAnswers.questionIndex, questionIndex),
+  )).limit(1);
+  if (!answer) throw new TrainingSessionStateError("Decisão não encontrada neste relatório.");
+  const [exercise, range] = await Promise.all([getExercise(answer), getNodeRange(answer)]);
+  if (!exercise || !range) throw new TrainingSessionStateError("Os dados de EV deste spot não estão disponíveis.");
+  return { exercise, range };
+}
+
+async function selectEligibleTrainingSet(filters: TrainingQueryFilters) {
   const [row] = await getDb().select({ id: trainingSets.id, playersCount: trainingSets.playersCount })
     .from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
@@ -292,9 +363,9 @@ async function getTrainingSetContext(trainingSetId: string) {
   return row ?? null;
 }
 
-async function getEligibleEntries(filters: TrainingFilters, trainingSetId: string): Promise<QueueEntry[]> {
+async function getEligibleEntries(filters: TrainingQueryFilters, trainingSetId?: string): Promise<QueueEntry[]> {
   const pivot = crypto.randomUUID();
-  const baseConditions = [eq(trainingSets.id, trainingSetId), ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
+  const baseConditions = [...(trainingSetId ? [eq(trainingSets.id, trainingSetId)] : []), ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
   const queryWindow = (boundary: SQL, limit: number) => getDb().select({
       trainingSetId: trainingSets.id,
       trainingNodeId: trainingNodes.id,
@@ -320,13 +391,13 @@ async function getReviewSetId(sessionId: string) {
   return row?.trainingSetId ?? null;
 }
 
-async function getReviewEntries(sessionId: string, trainingSetId: string): Promise<QueueEntry[]> {
+async function getReviewEntries(sessionId: string, trainingSetId?: string): Promise<QueueEntry[]> {
   const rows = await getDb().select({
     trainingSetId: trainingAnswers.trainingSetId,
     trainingNodeId: trainingAnswers.trainingNodeId,
     trainingHandId: trainingAnswers.trainingHandId,
   }).from(trainingAnswers)
-    .where(and(eq(trainingAnswers.trainingSessionId, sessionId), eq(trainingAnswers.trainingSetId, trainingSetId), eq(trainingAnswers.isCorrect, false)))
+    .where(and(eq(trainingAnswers.trainingSessionId, sessionId), ...(trainingSetId ? [eq(trainingAnswers.trainingSetId, trainingSetId)] : []), eq(trainingAnswers.isCorrect, false)))
     .orderBy(desc(trainingAnswers.answeredAt))
     .limit(MAX_EXERCISE_QUEUE_SIZE);
   return fisherYates(rows);
@@ -514,7 +585,9 @@ function sameConfig(left: TrainingConfig, right: TrainingConfig) {
     && left.targetQuestions === right.targetQuestions;
 }
 
-function buildReport(session: typeof trainingSessions.$inferSelect, answers: Array<{ handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null }>): TrainingReport {
+type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; trainingType: TrainingType; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
+
+function buildReport(session: typeof trainingSessions.$inferSelect, answers: ReportAnswerRow[]): TrainingReport {
   const answered = session.answeredQuestions;
   const correct = session.correctAnswers;
   const accuracy = answered ? Math.round(correct / answered * 100) : 0;
@@ -524,6 +597,7 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Arr
   const missed = new Map<string, number>();
   for (const answer of answers) if (!answer.isCorrect) missed.set(answer.handClass, (missed.get(answer.handClass) ?? 0) + 1);
   const mostMissedHands = [...missed].map(([handClass, errors]) => ({ handClass, errors })).sort((left, right) => right.errors - left.errors || left.handClass.localeCompare(right.handClass)).slice(0, 8);
+  const evMetric = reportEvMetric(answers);
   const feedback: string[] = [];
   if (answered >= 5 && accuracy >= 80) feedback.push(`Bom desempenho geral: ${accuracy}% de acerto.`);
   const comparablePositions = byPosition.filter((group) => group.answered >= 3);
@@ -552,12 +626,27 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Arr
     correctAnswers: correct,
     errors: answered - correct,
     accuracy,
+    evDelta: evMetric?.value ?? null,
+    evUnit: evMetric?.unit ?? null,
     durationSeconds: session.durationSeconds,
     averageSeconds: answered ? Number((session.durationSeconds / answered).toFixed(1)) : null,
     byPosition,
     byDecisionType,
     mostMissedHands,
-    errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: selectedActionLabel(answer.selectedAction), bestAction: answer.bestAction })),
+    errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: reportAnswerActionLabel(answer, answer.selectedAction), bestAction: reportAnswerActionLabel(answer, answer.bestAction) })),
+    decisionDetails: answers.map((answer) => ({
+      questionIndex: answer.questionIndex,
+      handClass: answer.handClass,
+      heroPosition: answer.heroPosition,
+      selectedAction: reportAnswerActionLabel(answer, answer.selectedAction),
+      selectedKey: actionKey(answer.selectedAction as TrainingAction),
+      bestAction: reportAnswerActionLabel(answer, answer.bestAction),
+      isCorrect: answer.isCorrect,
+      isMixed: Boolean(answer.isMixed),
+      strategy: answer.strategy,
+      evs: answer.evs,
+      evUnit: answer.evUnit,
+    })),
     feedback,
   };
 }
@@ -580,14 +669,31 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     correctAnswers: correct,
     errors: answered - correct,
     accuracy: answered ? Math.round(correct / answered * 100) : 0,
+    evDelta: null,
+    evUnit: null,
     durationSeconds: session.durationSeconds,
     averageSeconds: answered ? Number((session.durationSeconds / answered).toFixed(1)) : null,
     byPosition: [],
     byDecisionType: [],
     mostMissedHands: [],
     errorDetails: [],
+    decisionDetails: [],
     feedback: ["Resumo histórico: detalhes por mão não estavam disponíveis nesta versão."],
   };
+}
+
+function reportEvMetric(answers: Array<{ selectedAction: Record<string, unknown>; bestAction: string; evs: Record<string, number>; evUnit: EvUnit }>) {
+  if (!answers.length) return null;
+  let value = 0;
+  const unit = answers[0].evUnit;
+  for (const answer of answers) {
+    if (answer.evUnit !== unit) return null;
+    const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
+    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    if (selectedEv === null || !Number.isFinite(bestEv)) continue;
+    value += selectedEv - bestEv;
+  }
+  return { value, unit };
 }
 
 function groupAnswers<T>(answers: T[], label: (answer: T) => string) {
@@ -602,18 +708,21 @@ function groupAnswers<T>(answers: T[], label: (answer: T) => string) {
   return [...groups].map(([groupLabel, values]) => ({ label: groupLabel, ...values, accuracy: Math.round(values.correct / values.answered * 100) })).sort((left, right) => positionRank(left.label) - positionRank(right.label) || left.label.localeCompare(right.label));
 }
 
-function selectedActionLabel(action: Record<string, unknown>) {
-  return typeof action.label === "string" ? action.label : typeof action.id === "string" ? action.id : typeof action.type === "string" ? action.type : "—";
+function reportAnswerActionLabel(answer: ReportAnswerRow, value: Record<string, unknown> | string) {
+  return resolvedActionLabel(value as TrainingAction | string, answer.availableActions as TrainingAction[], {
+    heroStackBb: answer.heroStackBb,
+    trainingType: answer.trainingType,
+  });
 }
 
 function elapsedSeconds(startedAt: Date) { return Math.max(0, Math.round((Date.now() - startedAt.getTime()) / 1000)); }
 function eligibleHandCondition() { return sql`COALESCE((${trainingHands.metadata}->>'hrcWeight')::double precision, 1) >= 0.01`; }
 
-function conditions(filters: TrainingFilters, keys: Array<keyof TrainingFilters>) {
+function conditions(filters: TrainingQueryFilters, keys: Array<keyof TrainingFilters>) {
   const result = [...PUBLISHED_CONDITIONS];
   for (const key of keys) {
     const value = filters[key];
-    if (value === undefined || value === "") continue;
+    if (value === undefined || value === null || value === "") continue;
     if (key === "trainingType") result.push(eq(trainingNodes.trainingType, value as TrainingType));
     if (key === "equityModel") result.push(eq(trainingSets.equityModel, value as EquityModel));
     if (key === "stackDepthBb") result.push(eq(trainingNodes.heroStackBb, value as number));

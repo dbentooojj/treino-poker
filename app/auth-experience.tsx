@@ -3,6 +3,10 @@
 import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { Brand } from "../components/ui/AppHeader";
+import { Button, ButtonLink } from "../components/ui/Button";
+import { Icon } from "../components/ui/Icon";
+import { StatusMessage } from "../components/ui/Primitives";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordPolicyError } from "../lib/password-policy";
 
 type AuthMode = "login" | "recovery" | "register" | "reset";
@@ -78,7 +82,7 @@ export default function AuthExperience({ mode, token = "" }: { mode: AuthMode; t
   return (
     <main className="auth-page">
       <header className="auth-topbar">
-        <Link className="brand" href="/" aria-label="RangeLab, voltar para o início"><span className="brand-mark">R</span><span>Range<span>Lab</span></span></Link>
+        <Brand/>
         <Link className="auth-back" href="/">← Voltar para o início</Link>
       </header>
 
@@ -106,8 +110,8 @@ export default function AuthExperience({ mode, token = "" }: { mode: AuthMode; t
                 <h2 id="auth-title">{isReset ? "Acesso recuperado" : "Confira as instruções"}</h2>
                 <p>{isReset ? "Sua nova senha já está ativa. Entre novamente para continuar." : <>Se existir uma conta associada a <b>{email}</b>, um link de recuperação foi criado.</>}</p>
                 {devResetUrl && <a className="dev-reset-link" href={devResetUrl}>Abrir link de recuperação local →</a>}
-                <Link className="auth-submit" href="/login">Voltar para o login</Link>
-                {!isReset && <button type="button" className="auth-text-button" onClick={() => setSubmitted(false)}>Usar outro e-mail</button>}
+                <ButtonLink className="auth-submit-system" href="/login" fullWidth>Voltar para o login</ButtonLink>
+                {!isReset && <Button type="button" variant="ghost" onClick={() => setSubmitted(false)}>Usar outro e-mail</Button>}
               </div>
             ) : (
               <>
@@ -123,9 +127,9 @@ export default function AuthExperience({ mode, token = "" }: { mode: AuthMode; t
                     {mode === "login" && <label className="remember-row"><input type="checkbox" name="remember" checked={remember} onChange={(event) => setRemember(event.target.checked)} /><span>Lembrar de mim neste dispositivo</span></label>}
                   </>}
 
-                  {isReset && !token && <p className="auth-notice auth-error" role="alert">Este link de recuperação não possui um token válido.</p>}
-                  {error && <p className="auth-notice auth-error" role="alert">{error}</p>}
-                  <button className="auth-submit" type="submit" disabled={loading || (isReset && !token)}>{loading ? "Aguarde…" : isRecovery ? "Gerar link de recuperação" : isRegister ? "Criar minha conta" : isReset ? "Salvar nova senha" : "Entrar na conta"}<span>→</span></button>
+                  {isReset && !token && <StatusMessage className="auth-status" tone="error">Este link de recuperação não possui um token válido.</StatusMessage>}
+                  {error && <StatusMessage className="auth-status" tone="error">{error}</StatusMessage>}
+                  <Button className="auth-submit-system" type="submit" fullWidth loading={loading} disabled={isReset && !token}>{isRecovery ? "Gerar link de recuperação" : isRegister ? "Criar minha conta" : isReset ? "Salvar nova senha" : "Entrar na conta"}<Icon name="arrowRight"/></Button>
                 </form>
                 <div className="auth-separator"><span>ACESSO SEGURO</span></div>
                 <p className="auth-footer-copy">{isRecovery || isReset ? <>Lembrou sua senha? <Link href="/login">Voltar para o login</Link></> : isRegister ? <>Já tem uma conta? <Link href="/login">Entrar agora</Link></> : <>Ainda não tem uma conta? <Link href="/cadastro">Criar conta</Link></>}</p>

@@ -2,7 +2,7 @@ import { formatBb, recordValue, trainingTypeLabels, type EquityModel, type EvUni
 
 export type ProgressSessionRecord = {
   id: string;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   playersCount: number | null;
   stackBb: number | null;
   heroPosition: string | null;
@@ -284,7 +284,7 @@ function buildLatestSessions(
     const ev = evBySession.get(session.id);
     return {
       ...session,
-      trainingLabel: trainingTypeLabels[session.trainingType],
+      trainingLabel: session.trainingType === null ? "Todos os spots" : trainingTypeLabels[session.trainingType],
       configuration: `${session.playersCount === null ? "Várias mesas" : `${session.playersCount}-max`} · ${session.stackBb === null ? "todos os stacks" : `${formatBb(session.stackBb)} BB`}`,
       accuracy: calculateAccuracy(session.correctAnswers, session.totalAnswers),
       evLossBb: ev?.samples ? roundBb(ev.loss) : null,

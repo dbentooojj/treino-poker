@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, evaluateChoice, presentStrategy, rangeActionShares, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
+import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, evaluateChoice, presentStrategy, rangeActionShares, resolvedActionLabel, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
 
 const entries: QueueEntry[] = [
   { trainingSetId: "set-a", trainingNodeId: "btn", trainingHandId: "a7s" },
@@ -53,6 +53,14 @@ test("avaliação mantém best_action e rejeita ações inexistentes", () => {
   assert.equal(evaluateChoice("shove", actions, "shove", { fold: 0, shove: 2 })?.correct, true);
   assert.equal(evaluateChoice("fold", actions, "shove", { fold: 0, shove: 2 })?.correct, false);
   assert.equal(evaluateChoice("call", actions, "shove", { fold: 0, shove: 2 }), null);
+});
+
+test("converte identificadores HRC nos nomes reais das ações", () => {
+  const actions: TrainingAction[] = [{ id: "action-0", type: "FOLD" }, { id: "action-1", type: "CALL" }, { id: "action-2", type: "RAISE", amountBb: 6 }];
+  const context = { heroStackBb: 20, trainingType: "VS_OPEN" as const };
+  assert.equal(resolvedActionLabel("action-0", actions, context), "Fold");
+  assert.equal(resolvedActionLabel({ id: "action-1", type: "CALL" }, actions, context), "Call");
+  assert.equal(resolvedActionLabel("action-2", actions, context), "3-bet 6 BB");
 });
 
 test("avaliação aceita toda ação com frequência relevante em mixed strategies", () => {
@@ -146,14 +154,14 @@ test("calcula a proporção exata entre ação e fold para a cor do range", () =
 });
 
 test("cliente restaura sessão ativa e envia índice estável para retries", async () => {
-  const [home, trainer] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  const [workspace, trainer] = await Promise.all([
+    readFile(new URL("../app/treinar/training-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(home, /\/api\/training\/session\?active=1/);
-  assert.match(home, /rangelab:last-training-session/);
-  assert.match(home, /\/api\/training\/session\?id=/, "refresh da última resposta deve recuperar também o relatório encerrado");
-  assert.match(trainer, /questionIndex:\s*stats\.answered/);
+  assert.match(workspace, /\/api\/training\/session\?active=1/);
+  assert.match(workspace, /rangelab:last-training-session/);
+  assert.match(workspace, /\/api\/training\/session\?id=/, "refresh da última resposta deve recuperar também o relatório encerrado");
+  assert.match(trainer, /questionIndex:\s*answeredQuestions/);
 });
 
 function key(entry: QueueEntry) { return `${entry.trainingNodeId}:${entry.trainingHandId}`; }

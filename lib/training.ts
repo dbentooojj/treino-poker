@@ -20,6 +20,9 @@ export type TrainingAction = {
 };
 
 export type TrainingSequenceAction = TrainingAction & { position?: string };
+export type TrainingMode = "DECISION" | "FULL_HAND";
+export type TrainingStreet = "PREFLOP" | "FLOP" | "TURN" | "RIVER";
+export type TrainingGameType = "TOURNAMENT";
 
 export type TrainingFilters = {
   trainingType?: TrainingType;
@@ -28,7 +31,8 @@ export type TrainingFilters = {
   heroPosition?: string;
 };
 
-export type TrainingConfig = Required<Pick<TrainingFilters, "trainingType" | "equityModel">> & {
+export type TrainingConfig = Required<Pick<TrainingFilters, "equityModel">> & {
+  trainingType: TrainingType | null;
   stackDepthBb?: number;
   heroPosition?: string;
   targetQuestions: number | null;
@@ -47,6 +51,18 @@ export type TrainingOptions = {
   stackDepthsBb: number[];
   heroPositions: string[];
   hasMatches: boolean;
+  tableContext: TrainingTableContext | null;
+};
+
+export type TrainingTableContext = {
+  trainingSetId: string;
+  studyName: string;
+  gameType: TrainingGameType;
+  equityModel: EquityModel;
+  playersCount: number;
+  heroStackBb: number;
+  heroPosition: string;
+  actionSequence: TrainingSequenceAction[];
 };
 
 export type QueueEntry = {
@@ -117,17 +133,32 @@ export type TrainingSession = {
   targetQuestions: number | null;
   answeredQuestions: number;
   correctAnswers: number;
+  evDelta: number;
+  evUnit: EvUnit;
   exercise: TrainingExercise;
 };
 
 export type ReportGroup = { label: string; answered: number; correct: number; accuracy: number };
+export type TrainingDecisionDetail = {
+  questionIndex: number;
+  handClass: string;
+  heroPosition: string;
+  selectedAction: string;
+  selectedKey: string;
+  bestAction: string;
+  isCorrect: boolean;
+  isMixed: boolean;
+  strategy: Record<string, number>;
+  evs: Record<string, number>;
+  evUnit: EvUnit;
+};
 export type TrainingReport = {
   sessionId: string;
   detailsAvailable: boolean;
   detailsTruncated: boolean;
   detailAnswers: number;
   completionReason: CompletionReason;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   equityModel: EquityModel;
   stackDepthBb: number | null;
   heroPosition: string | null;
@@ -136,12 +167,15 @@ export type TrainingReport = {
   correctAnswers: number;
   errors: number;
   accuracy: number;
+  evDelta: number | null;
+  evUnit: EvUnit | null;
   durationSeconds: number;
   averageSeconds: number | null;
   byPosition: ReportGroup[];
   byDecisionType: ReportGroup[];
   mostMissedHands: Array<{ handClass: string; errors: number }>;
   errorDetails: Array<{ handClass: string; heroPosition: string; selectedAction: string; bestAction: string }>;
+  decisionDetails: TrainingDecisionDetail[];
   feedback: string[];
 };
 
@@ -160,6 +194,7 @@ export const trainingTypeDescriptions: Record<TrainingType, string> = {
 };
 
 export const equityModelLabels: Record<EquityModel, string> = { CHIP_EV: "ChipEV", ICM: "ICM" };
+export const gameTypeLabels: Record<TrainingGameType, string> = { TOURNAMENT: "MTT" };
 
 export function actionKey(action: TrainingAction) { return action.id ?? action.type; }
 
@@ -173,6 +208,14 @@ export function actionLabel(action: TrainingAction, node: Pick<TrainingExercise,
   if (node.trainingType === "OPEN_FOLD") return action.amountBb ? `Open ${formatBb(action.amountBb)} BB` : "Open raise";
   if (node.trainingType === "VS_OPEN") return action.amountBb ? `3-bet ${formatBb(action.amountBb)} BB` : "3-bet";
   return action.amountBb ? `Raise ${formatBb(action.amountBb)} BB` : "Raise";
+}
+
+export function resolvedActionLabel(value: TrainingAction | string, actions: TrainingAction[], node: Pick<TrainingExercise, "heroStackBb" | "trainingType">) {
+  const aliases = typeof value === "string" ? [value] : actionAliases(value);
+  const resolved = actions.find((action) => actionAliases(action).some((alias) => aliases.includes(alias)));
+  if (resolved) return actionLabel(resolved, node);
+  if (typeof value !== "string") return actionLabel(value, node);
+  return value;
 }
 
 export function formatBb(value: number) { return Number(value.toFixed(2)).toString(); }

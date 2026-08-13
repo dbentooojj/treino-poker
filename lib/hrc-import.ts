@@ -93,6 +93,7 @@ const MAX_NODE_COUNT = 500;
 const HAND_RANKS = [..."AKQJT98765432"];
 const CANONICAL_HAND_CLASSES = new Set(buildCanonicalHandClasses());
 const FREQUENCY_EPSILON = 1e-6;
+const HRC_FREQUENCY_ROUNDING_ERROR = 0.5e-4;
 const ALLOWED_MIME_TYPES = new Set(["", "application/zip", "application/x-zip-compressed", "application/octet-stream"]);
 
 type UploadedFile = Blob & { name: string; type: string };
@@ -631,7 +632,8 @@ function normalizeFrequencies(values: number[], actionCount: number, handClass: 
     return value;
   });
   const total = bounded.reduce((sum, value) => sum + value, 0);
-  if (!Number.isFinite(total) || Math.abs(total - 1) > FREQUENCY_EPSILON) {
+  const sumTolerance = actionCount * HRC_FREQUENCY_ROUNDING_ERROR + FREQUENCY_EPSILON;
+  if (!Number.isFinite(total) || Math.abs(total - 1) > sumTolerance) {
     throw new HrcImportError(`Frequências de ${handClass} não somam 1 no node ${sourcePath}.`);
   }
   return bounded.map((value) => value / total);

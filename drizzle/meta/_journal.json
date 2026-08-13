@@ -36,6 +36,20 @@
       "when": 1786324716193,
       "tag": "0004_young_giant_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786410000000,
+      "tag": "0005_quick_training_any",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786413600000,
+      "tag": "0006_archived_study_reimport",
+      "breakpoints": true
     }
   ]
 }

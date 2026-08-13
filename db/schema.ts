@@ -85,7 +85,7 @@ export const trainingSets = pgTable("training_sets", {
   publishedAt: timestamp("published_at", { withTimezone: true }),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
 }, (table) => [
-  uniqueIndex("training_sets_content_hash_unique").on(table.contentHash),
+  uniqueIndex("training_sets_content_hash_unique").on(table.contentHash).where(sql`${table.status} <> 'ARCHIVED'`),
   index("training_sets_lookup_idx").on(table.gameType, table.street, table.equityModel, table.playersCount),
   index("training_sets_publication_idx").on(table.isPublished, table.status, table.displayOrder),
   check("training_sets_players_count_check", sql`${table.playersCount} BETWEEN 2 AND 10`),
@@ -130,7 +130,7 @@ export const trainingSessions = pgTable("training_sessions", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   trainingSetId: uuid("training_set_id").references(() => trainingSets.id, { onDelete: "restrict" }),
-  trainingType: trainingType("training_type").notNull(),
+  trainingType: trainingType("training_type"),
   equityModel: equityModel("equity_model").notNull(),
   playersCount: integer("players_count"),
   stackBb: doublePrecision("stack_bb"),

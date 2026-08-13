@@ -16,15 +16,13 @@ import {
   type TrainingExercise,
 } from "../../lib/training";
 
-export function RangeMatrix({ exercise, range }: { exercise: TrainingExercise; range: NodeRange }) {
+export function RangeMatrix({ exercise, range, hideSpotLabel = false }: { exercise: TrainingExercise; range: NodeRange; hideSpotLabel?: boolean }) {
   const sectionRef = useRef<HTMLElement>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const [hoveredHand, setHoveredHand] = useState<string | null>(null);
   const [pinnedHand, setPinnedHand] = useState<string | null>(null);
   const activeHand = pinnedHand ?? hoveredHand;
   const hands = new Map(range.hands.map((hand) => [hand.handClass.toUpperCase(), hand]));
-  const rangeAction = exercise.availableActions.find((action) => action.type !== "FOLD") ?? exercise.availableActions[0];
-  const actionName = rangeAction ? actionLabel(rangeAction, exercise) : "Ação";
 
   useEffect(() => {
     function closeOutside(event: PointerEvent) {
@@ -85,13 +83,13 @@ export function RangeMatrix({ exercise, range }: { exercise: TrainingExercise; r
     if (!pinnedHand) setHoveredHand(null);
   }
 
-  return <section ref={sectionRef} className="rl-range-section" aria-labelledby="range-title">
-    <div className="rl-range-topline">
-      <h2 id="range-title">RANGE DESTE SPOT <span>{exercise.heroPosition} · {formatBb(exercise.heroStackBb)} BB</span></h2>
+  return <section ref={sectionRef} className="rl-range-section" aria-labelledby={hideSpotLabel ? undefined : "range-title"} aria-label={hideSpotLabel ? "Range do spot selecionado" : undefined}>
+    <div className={`rl-range-topline ${hideSpotLabel ? "context-hidden" : ""}`}>
+      {!hideSpotLabel && <h2 id="range-title">RANGE DESTE SPOT <span>{exercise.heroPosition} · {formatBb(exercise.heroStackBb)} BB</span></h2>}
       <div className="rl-range-legend" aria-label="Legenda da matriz">
-        <span><i className="action"/>{actionName}</span>
-        <span><i className="mixed"/>Mix</span>
-        <span><i className="fold"/>Fold</span>
+        <span><i className="positive"/>EV positivo</span>
+        <span><i className="neutral"/>EV neutro</span>
+        <span><i className="negative"/>EV negativo</span>
         <span><i className="current"/>Sua mão</span>
       </div>
     </div>
@@ -111,9 +109,10 @@ export function RangeMatrix({ exercise, range }: { exercise: TrainingExercise; r
         return <div
           key={cell.handClass}
           role="gridcell"
-          className={`rl-range-cell ${isCurrent ? "current-hand" : ""} ${isActive ? "is-inspecting" : ""} ${mixed ? "mixed" : ""} ${shares.hasData ? "has-data" : "no-data"}`}
+          className={`rl-range-cell ${isCurrent ? "current-hand" : ""} ${isActive ? "is-inspecting" : ""} ${mixed ? "mixed" : ""} ${shares.hasData ? "has-data" : "no-data"} ${rangeCellTone(bestEv)}`}
           style={{
-            "--range-cell-color": rangeCellColor(shares.actionPercent, shares.foldPercent, shares.hasData),
+            "--range-cell-color": rangeCellColor(bestEv),
+            "--range-cell-ink": bestEv === null ? "#95a09b" : "#101814",
           } as React.CSSProperties}
           onPointerEnter={(event) => { if (hand && event.pointerType !== "touch") scheduleHover(cell.handClass); }}
           onPointerLeave={leaveHand}
@@ -228,11 +227,20 @@ function formatCellEv(value: number) {
   return value.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function rangeCellColor(actionPercent: number, foldPercent: number, hasData: boolean) {
-  if (!hasData || actionPercent + foldPercent <= 0) return "#343d39";
-  const actionRatio = actionPercent / (actionPercent + foldPercent);
-  if (actionRatio <= 0.5) return mixRgb([239, 159, 157], [242, 238, 226], actionRatio * 2);
-  return mixRgb([242, 238, 226], [105, 213, 130], (actionRatio - 0.5) * 2);
+function rangeCellTone(ev: number | null) {
+  if (ev === null) return "ev-no-data";
+  if (Math.abs(ev) <= 0.025) return "ev-neutral";
+  return ev > 0 ? "ev-positive" : "ev-negative";
+}
+
+function rangeCellColor(ev: number | null) {
+  if (ev === null) return "#2d3532";
+  const magnitude = Math.abs(ev);
+  if (magnitude <= 0.025) return "#e5e7e1";
+  const intensity = Math.min(1, Math.sqrt(magnitude / 2));
+  return ev > 0
+    ? mixRgb([226, 233, 226], [88, 220, 113], intensity)
+    : mixRgb([235, 229, 225], [239, 143, 141], intensity);
 }
 
 function mixRgb(from: [number, number, number], to: [number, number, number], amount: number) {

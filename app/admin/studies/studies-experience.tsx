@@ -1,7 +1,11 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import AppHeader from "../../../components/ui/AppHeader";
+import { Button } from "../../../components/ui/Button";
+import { Icon } from "../../../components/ui/Icon";
+import { Modal } from "../../../components/ui/Modal";
+import { EmptyState, PageContainer, PageHeader, StatusMessage } from "../../../components/ui/Primitives";
 import type { AuthUser } from "../../../db/auth";
 import type { AdminStudy, StudiesAdminData } from "../../../db/studies";
 import type { HrcImportSummary } from "../../../lib/hrc-import";
@@ -32,15 +36,6 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
   const [updatingStudyId, setUpdatingStudyId] = useState<string | null>(null);
   const [importError, setImportError] = useState("");
   const [importReport, setImportReport] = useState<HrcImportSummary | null>(null);
-
-  useEffect(() => {
-    if (!importOpen) return;
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setImportOpen(false);
-    }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [importOpen]);
 
   async function importStudy(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -88,32 +83,17 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
     }
   }
 
-  return <main className="admin-shell">
-    <header className="admin-topbar">
-      <Link className="brand" href="/" aria-label="Voltar para o RangeLab">
-        <span className="brand-mark">R</span><span>Range<span>Lab</span></span>
-      </Link>
-      <nav className="admin-nav" aria-label="Navegação administrativa">
-        <Link className="active" href="/admin/studies">Estudos HRC</Link>
-      </nav>
-      <div className="admin-user">
-        <span className="user-chip"><i>{user.name.charAt(0).toUpperCase()}</i><b>{user.name}</b><small>ADM</small></span>
-        <Link href="/">Voltar ao site</Link>
-      </div>
-    </header>
+  return <main className="member-shell admin-shell">
+    <AppHeader user={user} active="admin"/>
+    <PageContainer>
+      <PageHeader eyebrow="Administração" title="Estudos HRC" description="Gerencie os estudos utilizados nos treinamentos." action={<Button type="button" onClick={() => { setImportError(""); setImportOpen(true); }}><Icon name="upload"/>Importar estudo</Button>}/>
 
-    <section className="admin-content">
-      <div className="admin-heading">
-        <div><span>ADMINISTRAÇÃO</span><h1>Estudos HRC</h1><p>Gerencie os estudos utilizados nos treinamentos.</p></div>
-        <button className="admin-import-button" onClick={() => { setImportError(""); setImportOpen(true); }}><span>＋</span> Importar estudo</button>
-      </div>
-
-      {importReport && <div className="admin-import-notice" role="status"><span>✓</span><div>
+      {importReport && <StatusMessage className="admin-import-notice-system" tone="success"><div>
         <b>Importação concluída — {importReport.name}</b>
         <small>{modelLabels[importReport.equityModel]} · {importReport.playersCount}-max · {importReport.stackBb === null ? "stacks variados" : `${formatNumber(importReport.stackBb)} BB`} · {formatAnte(importReport)}</small>
         <small>{importReport.counts.PUSH_FOLD} Push/Fold · {importReport.counts.CALL_VS_SHOVE} Call vs Shove · {importReport.counts.OPEN_FOLD} Open/Fold · {importReport.counts.VS_OPEN} Vs Open</small>
-      </div><button onClick={() => setImportReport(null)} aria-label="Fechar aviso">×</button></div>}
-      {importError && !importOpen && <div className="admin-import-error" role="alert">{importError}</div>}
+      </div><Button type="button" variant="ghost" size="sm" iconOnly onClick={() => setImportReport(null)} aria-label="Fechar aviso"><Icon name="close"/></Button></StatusMessage>}
+      {importError && !importOpen && <StatusMessage className="admin-page-status" tone="error">{importError}</StatusMessage>}
 
       <div className="admin-summary" aria-label="Resumo dos estudos">
         <article><span>ESTUDOS</span><strong>{adminData.summary.studies}</strong><small>Total cadastrado</small></article>
@@ -126,39 +106,35 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
         {adminData.studies.length > 0 ? <div className="studies-table-scroll"><table className="studies-table">
           <thead><tr><th>Nome</th><th>Modelo</th><th>Mesa</th><th>Stack</th><th>Ante</th><th>Spots</th><th>Status</th><th>Importado em</th><th>Ações</th></tr></thead>
           <tbody>{adminData.studies.map((study) => <tr key={study.id}>
-            <td><b>{study.name}</b><small>HRC · Pré-flop</small></td>
-            <td>{modelLabels[study.equityModel]}</td>
-            <td>{study.playersCount}-max</td>
-            <td>{study.stackBb === null ? "—" : `${formatNumber(study.stackBb)} BB`}</td>
-            <td>{study.anteType === "NONE" ? anteLabels.NONE : `${anteLabels[study.anteType]} ${formatNumber(study.anteBb)} BB`}</td>
-            <td>{study.spotCount}</td>
-            <td><span className={`study-status ${study.isPublished ? "active" : "inactive"}`}><i />{study.status === "PUBLISHED" ? "Publicado" : study.status === "ARCHIVED" ? "Arquivado" : "Importado"}</span></td>
-            <td>{formatDate(study.importedAt)}</td>
-            <td><div className="study-actions" aria-label={`Ações para ${study.name}`}><button disabled title="Disponível na próxima etapa">Visualizar</button><button disabled={updatingStudyId === study.id} onClick={() => updatePublication(study)}>{updatingStudyId === study.id ? "Salvando…" : study.isPublished ? "Despublicar" : "Publicar"}</button><button className="danger" disabled title="Disponível na próxima etapa">Excluir</button></div></td>
+            <td data-label="Nome"><b>{study.name}</b><small>HRC · Pré-flop</small></td>
+            <td data-label="Modelo">{modelLabels[study.equityModel]}</td>
+            <td data-label="Mesa">{study.playersCount}-max</td>
+            <td data-label="Stack">{study.stackBb === null ? "—" : `${formatNumber(study.stackBb)} BB`}</td>
+            <td data-label="Ante">{study.anteType === "NONE" ? anteLabels.NONE : `${anteLabels[study.anteType]} ${formatNumber(study.anteBb)} BB`}</td>
+            <td data-label="Spots">{study.spotCount}</td>
+            <td data-label="Status"><span className={`study-status ${study.isPublished ? "active" : "inactive"}`}><i />{study.status === "PUBLISHED" ? "Publicado" : study.status === "ARCHIVED" ? "Arquivado" : "Importado"}</span></td>
+            <td data-label="Importado em">{formatDate(study.importedAt)}</td>
+            <td data-label="Ações"><div className="study-actions" aria-label={`Ações para ${study.name}`}><Button type="button" variant="ghost" size="sm" disabled title="Disponível na próxima etapa">Visualizar</Button><Button type="button" variant="outline" size="sm" loading={updatingStudyId === study.id} onClick={() => updatePublication(study)}>{study.isPublished ? "Despublicar" : "Publicar"}</Button><Button type="button" variant="danger" size="sm" disabled title="Disponível na próxima etapa">Excluir</Button></div></td>
           </tr>)}</tbody>
         </table></div> : <div className="studies-empty">
-          <div className="studies-empty-icon" aria-hidden="true"><span>HRC</span><i>＋</i></div>
-          <h2>Nenhum estudo HRC importado ainda.</h2>
-          <p>Importe seu primeiro estudo e publique-o após a revisão para disponibilizar seus spots.</p>
-          <button className="admin-import-button secondary" onClick={() => { setImportError(""); setImportOpen(true); }}>Importar estudo</button>
+          <EmptyState icon="upload" title="Nenhum estudo HRC importado ainda." description="Importe seu primeiro estudo e publique-o após a revisão para disponibilizar seus spots." actions={<Button type="button" variant="secondary" onClick={() => { setImportError(""); setImportOpen(true); }}><Icon name="upload"/>Importar estudo</Button>}/>
         </div>}
       </section>
-    </section>
+    </PageContainer>
 
-    {importOpen && <div className="admin-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setImportOpen(false); }}>
-      <section className="admin-modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
-        <button className="admin-modal-close" onClick={() => setImportOpen(false)} aria-label="Fechar">×</button>
+    {importOpen && <Modal titleId="import-title" descriptionId="import-description" onClose={() => setImportOpen(false)} className="admin-modal-system">
+      <section className="admin-modal-content">
         <div className="admin-modal-icon" aria-hidden="true">⇧</div>
         <span>IMPORTAÇÃO HRC</span>
         <h2 id="import-title">Importar estudo</h2>
-        <p>Selecione o ZIP gerado em <b>Export Strategies → Complete Export</b>. O estudo, seus nodes e todas as estratégias compatíveis serão salvos.</p>
-        {importError && <div className="admin-import-error" role="alert">{importError}</div>}
+        <p id="import-description">Selecione o ZIP gerado em <b>Export Strategies → Complete Export</b>. O estudo, seus nodes e todas as estratégias compatíveis serão salvos.</p>
+        {importError && <StatusMessage tone="error">{importError}</StatusMessage>}
         <label className={`admin-modal-confirm ${importing ? "loading" : ""}`}>
           {importing ? "Processando e salvando…" : "Selecionar arquivo .zip"}
           <input type="file" accept=".zip,application/zip" disabled={importing} onChange={importStudy}/>
         </label>
       </section>
-    </div>}
+    </Modal>}
   </main>;
 }
 

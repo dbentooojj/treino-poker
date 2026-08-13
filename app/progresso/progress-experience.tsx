@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { PageContainer, PageHeader, SegmentedControl, SegmentedTabs, StatusMessage } from "../../components/ui/Primitives";
 import { trainingTypeLabels } from "../../lib/training";
 import type { ProgressBreakdownItem, ProgressDashboardData, ProgressEvolutionPoint } from "../../lib/progress";
 
@@ -26,10 +27,10 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
     setSelectedPerformance(null);
   }
 
-  return <section className="member-content progress-content">
-    <div className="progress-heading"><h1>Progresso</h1><p>Acompanhe sua consistência e veja como suas decisões evoluem a cada treino.</p></div>
+  return <PageContainer>
+    <PageHeader eyebrow="Seu desempenho" title="Progresso" description="Acompanhe sua consistência e veja como suas decisões evoluem a cada treino."/>
 
-    {partialCoverage && <p className="progress-footnote" role="status"><LineIcon name="info" /> Janela recente limitada a {numberFormatter.format(data.coverage.sessionLimit)} sessões e {numberFormatter.format(data.coverage.answerLimit)} respostas. Totais e detalhes abaixo cobrem somente os registros carregados.</p>}
+    {partialCoverage && <StatusMessage className="progress-status">Janela recente limitada a {numberFormatter.format(data.coverage.sessionLimit)} sessões e {numberFormatter.format(data.coverage.answerLimit)} respostas. Totais e detalhes abaixo cobrem somente os registros carregados.</StatusMessage>}
 
     <section className="progress-summary" aria-label={partialCoverage ? "Resumo da janela recente" : "Resumo geral"}>
       <SummaryCard
@@ -64,7 +65,7 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
       <section className="progress-panel evolution-panel" aria-labelledby="evolution-title">
         <div className="progress-panel-heading">
           <div className="progress-title"><LineIcon name="trend" /><h2 id="evolution-title">Evolução</h2></div>
-          <div className="progress-filter" aria-label="Período do gráfico">{([7, 30, "all"] as const).map((option) => <button key={option} type="button" className={range === option ? "active" : ""} aria-pressed={range === option} onClick={() => setRange(option)}>{option === "all" ? (partialCoverage ? "Janela" : "Todos") : `${option} dias`}</button>)}</div>
+          <SegmentedControl label="Período do gráfico" value={range} onChange={setRange} options={[{ value: 7, label: "7 dias" }, { value: 30, label: "30 dias" }, { value: "all", label: partialCoverage ? "Janela" : "Todos" }] as const}/>
         </div>
         {evolution.length > 1 ? <EvolutionChart points={evolution} /> : <ProgressEmpty title="Complete alguns treinos para acompanhar sua evolução." detail="São necessários dados de pelo menos dois dias no período selecionado." />}
         {evolution.length > 1 && <EvolutionInsight points={evolution} />}
@@ -84,11 +85,7 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
 
     <section className="progress-panel performance-panel" aria-labelledby="performance-title">
       <div className="progress-panel-heading"><div className="progress-title"><LineIcon name="bars" /><h2 id="performance-title">Desempenho</h2></div></div>
-      <div className="performance-tabs" role="tablist" aria-label="Agrupar desempenho">
-        <TabButton value="training" active={tab} onSelect={selectTab}>Por treino</TabButton>
-        <TabButton value="position" active={tab} onSelect={selectTab}>Por posição</TabButton>
-        <TabButton value="stack" active={tab} onSelect={selectTab}>Por stack</TabButton>
-      </div>
+      <SegmentedTabs className="performance-tabs-system" label="Agrupar desempenho" value={tab} onChange={selectTab} panelId="performance-panel" options={[{ value: "training", label: "Por treino" }, { value: "position", label: "Por posição" }, { value: "stack", label: "Por stack" }] as const}/>
       {performance.length ? <div className="performance-list" id="performance-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
         {performance.map((item) => <PerformanceRow key={item.key} item={item} selected={selectedPerformance === item.key} onSelect={() => setSelectedPerformance(selectedPerformance === item.key ? null : item.key)} />)}
       </div> : <ProgressEmpty compact title="Ainda não há dados para este agrupamento." detail="As barras aparecerão depois das primeiras decisões salvas." />}
@@ -120,7 +117,7 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
     </div>
 
     <footer className="progress-footer"><LineIcon name="shield" /> Treine com consistência. Evolua com dados.</footer>
-  </section>;
+  </PageContainer>;
 }
 
 function SummaryCard({ label, value, icon, variation, tone, unavailable }: { label: string; value: string; icon: IconName; variation: Variation | null; tone?: "negative"; unavailable?: string }) {
@@ -129,10 +126,6 @@ function SummaryCard({ label, value, icon, variation, tone, unavailable }: { lab
     <strong>{value}</strong>
     <div className="summary-change">{variation ? <><b className={variation.tone}>{variation.text}</b><span>vs. 30 dias anteriores</span></> : <span>{unavailable ?? "Comparativo disponível após 60 dias"}</span>}</div>
   </article>;
-}
-
-function TabButton({ value, active, onSelect, children }: { value: PerformanceTab; active: PerformanceTab; onSelect: (value: PerformanceTab) => void; children: React.ReactNode }) {
-  return <button id={`tab-${value}`} type="button" role="tab" aria-selected={active === value} aria-controls="performance-panel" className={active === value ? "active" : ""} onClick={() => onSelect(value)}>{children}</button>;
 }
 
 function PerformanceRow({ item, selected, onSelect }: { item: ProgressBreakdownItem; selected: boolean; onSelect: () => void }) {
@@ -170,7 +163,7 @@ function EvolutionInsight({ points }: { points: ProgressEvolutionPoint[] }) {
 }
 
 function ProgressEmpty({ title, detail, compact, action }: { title: string; detail: string; compact?: boolean; action?: boolean }) {
-  return <div className={`progress-section-empty ${compact ? "compact" : ""}`}><LineIcon name="spark" /><div><b>{title}</b><span>{detail}</span>{action && <Link href="/#modos">Começar a treinar →</Link>}</div></div>;
+  return <div className={`progress-section-empty ${compact ? "compact" : ""}`}><LineIcon name="spark" /><div><b>{title}</b><span>{detail}</span>{action && <Link href="/treinar">Começar a treinar →</Link>}</div></div>;
 }
 
 type IconName = "cards" | "target" | "trend" | "loss" | "bars" | "info" | "network" | "clock" | "shield" | "spark";

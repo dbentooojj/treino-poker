@@ -3,6 +3,8 @@
 import { FormEvent, useState } from "react";
 import type { AuthUser } from "../../db/auth";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordPolicyError } from "../../lib/password-policy";
+import { Button } from "../../components/ui/Button";
+import { PageContainer, PageHeader, StatusMessage } from "../../components/ui/Primitives";
 import MemberHeader from "../member-header";
 
 export default function AccountExperience({ initialUser }: { initialUser: AuthUser }) {
@@ -69,8 +71,8 @@ export default function AccountExperience({ initialUser }: { initialUser: AuthUs
 
   return <main className="member-shell">
     <MemberHeader user={user} active="account" />
-    <section className="member-content">
-      <div className="member-heading"><span>MINHA CONTA</span><h1>Seus dados, do seu jeito.</h1><p>Atualize suas informações de acesso e mantenha a conta protegida.</p></div>
+    <PageContainer width="compact">
+      <PageHeader eyebrow="Minha conta" title="Seus dados, do seu jeito." description="Atualize suas informações de acesso e mantenha a conta protegida."/>
       <div className="account-grid">
         <section className="settings-card" aria-labelledby="profile-title">
           <div className="settings-card-heading"><i aria-hidden="true">U</i><div><span>PERFIL</span><h2 id="profile-title">Dados pessoais</h2><p>Estas informações aparecem na sua conta.</p></div></div>
@@ -81,9 +83,9 @@ export default function AccountExperience({ initialUser }: { initialUser: AuthUs
             <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
             <label htmlFor="profile-password">Senha atual <small>necessária somente ao trocar o e-mail</small></label>
             <input id="profile-password" type="password" value={profilePassword} onChange={(event) => setProfilePassword(event.target.value)} autoComplete="current-password" placeholder="Confirme para alterar o e-mail" />
-            {profileState.error && <p className="settings-message error" role="alert">{profileState.error}</p>}
-            {profileState.success && <p className="settings-message success" role="status">{profileState.success}</p>}
-            <button className="settings-submit" disabled={profileState.loading}>{profileState.loading ? "Salvando…" : "Salvar alterações"}</button>
+            {profileState.error && <StatusMessage className="settings-status" tone="error">{profileState.error}</StatusMessage>}
+            {profileState.success && <StatusMessage className="settings-status" tone="success">{profileState.success}</StatusMessage>}
+            <Button className="settings-submit-system" type="submit" fullWidth loading={profileState.loading}>Salvar alterações</Button>
           </form>
         </section>
 
@@ -97,12 +99,12 @@ export default function AccountExperience({ initialUser }: { initialUser: AuthUs
             <label htmlFor="confirm-new-password">Confirmar nova senha</label>
             <input id="confirm-new-password" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={PASSWORD_MIN_LENGTH} maxLength={PASSWORD_MAX_LENGTH} required />
             <p className="settings-hint">Use pelo menos {PASSWORD_MIN_LENGTH} caracteres e um caractere especial.</p>
-            {passwordState.error && <p className="settings-message error" role="alert">{passwordState.error}</p>}
-            {passwordState.success && <p className="settings-message success" role="status">{passwordState.success} <a href="/login">Ir para o login</a></p>}
-            <button className="settings-submit secondary" disabled={passwordState.loading || Boolean(passwordState.success)}>{passwordState.loading ? "Alterando…" : "Alterar senha"}</button>
+            {passwordState.error && <StatusMessage className="settings-status" tone="error">{passwordState.error}</StatusMessage>}
+            {passwordState.success && <StatusMessage className="settings-status" tone="success">{passwordState.success} <a href="/login">Ir para o login</a></StatusMessage>}
+            <Button className="settings-submit-system" type="submit" variant="secondary" fullWidth loading={passwordState.loading} disabled={Boolean(passwordState.success)}>Alterar senha</Button>
           </form>
         </section>
       </div>
-    </section>
+    </PageContainer>
   </main>;
 }

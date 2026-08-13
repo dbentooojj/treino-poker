@@ -32,7 +32,7 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   await migrate(getDb(), { migrationsFolder: "drizzle" });
   const sqlClient = getSqlClient();
   const [{ count: migrationCount }] = await sqlClient<{ count: number }[]>`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-  assert.equal(migrationCount, 5, "as migrations devem ser aplicadas");
+  assert.equal(migrationCount, 7, "as migrations devem ser aplicadas");
 
   const [{ data_type: hashType }] = await sqlClient<{ data_type: string }[]>`
     SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'training_sets' AND column_name = 'content_hash'`;
@@ -206,6 +206,20 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   const [{ count: rolledBack }] = await sqlClient<{ count: number }[]>`SELECT count(*)::int AS count FROM training_sets WHERE content_hash = ${rollbackStudy.contentHash}`;
   assert.equal(rolledBack, 0, "uma falha em training_hands deve reverter set e nodes");
 
+  const reimportStudy = toHrcStudyImport(await parseHrcPack(zipFile("reimport.zip", "KJs", 4.5)));
+  reimportStudy.contentHash = "e".repeat(64);
+  reimportStudy.name = "Estudo para reimportar";
+  const archivedVersion = await persistHrcStudy(reimportStudy, adminUser.id);
+  await sqlClient`UPDATE training_sets SET status = 'ARCHIVED', is_published = false, published_at = NULL WHERE id = ${archivedVersion.id}`;
+  const replacementVersion = await persistHrcStudy(reimportStudy, adminUser.id);
+  assert.notEqual(replacementVersion.id, archivedVersion.id, "a versão validada deve preservar o estudo arquivado");
+  await assert.rejects(persistHrcStudy(reimportStudy, adminUser.id), /já foi importado/, "uma versão ativa continua protegida contra duplicação");
+  const [{ archived, active }] = await sqlClient<{ archived: number; active: number }[]>`
+    SELECT count(*) FILTER (WHERE status = 'ARCHIVED')::int AS archived,
+      count(*) FILTER (WHERE status <> 'ARCHIVED')::int AS active
+    FROM training_sets WHERE content_hash = ${reimportStudy.contentHash}`;
+  assert.deepEqual({ archived, active }, { archived: 1, active: 1 });
+
   const { actionKey } = await import("../lib/training");
   const { answerTrainingSession, createTrainingSession, finishTrainingSession, getTrainingOptions, getTrainingReport } = await import("../db/training");
   const legacySummaryId = crypto.randomUUID();
@@ -239,6 +253,11 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   const publishedOptions = await getTrainingOptions(config);
   assert.equal(publishedOptions.hasMatches, true, "estudo publicado deve aparecer nos filtros");
   assert.deepEqual(publishedOptions.trainingTypes, ["PUSH_FOLD"]);
+
+  const anySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1 } });
+  assert.equal(anySession.config.trainingType, null, "Any deve criar uma sessão sem restringir o tipo de spot");
+  assert.equal(anySession.exercise.trainingType, "PUSH_FOLD", "a pergunta continua preservando sua categoria real");
+  await finishTrainingSession(adminUser.id, anySession.id);
 
   await sqlClient`UPDATE training_hands SET strategy = '{"action-0":0.4,"action-1":0.6}'::jsonb, is_mixed = true
     WHERE training_node_id IN (SELECT id FROM training_nodes WHERE training_set_id = ${imported.study.id})`;
@@ -484,6 +503,13 @@ async function proveHistoricalSessionUpgrade(adminClient: postgres.Sql, sourceUr
           0, 0, NULL, ${upgrade.json([{ trainingSetId: setId, trainingNodeId: nodeId, trainingHandId: "40000000-0000-4000-8000-000000000099" }])}, 0, 0, '2026-02-07T10:00:00Z')`;
     await applyMigrationSql(upgrade, new URL("../drizzle/0003_oval_glorian.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0004_young_giant_girl.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0005_quick_training_any.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0006_archived_study_reimport.sql", import.meta.url));
+
+    const [{ is_nullable: sessionTypeNullable }] = await upgrade<{ is_nullable: string }[]>`
+      SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'training_sessions' AND column_name = 'training_type'`;
+    assert.equal(sessionTypeNullable, "YES", "Any exige que a sessão possa representar vários tipos de spot");
 
     const legacyRows = await upgrade<{ id: string; answered_questions: number; correct_answers: number; answer_details_available: boolean; ended_at: Date | null; completion_reason: string | null; target_questions: number | null; queue_size: number }[]>`
       SELECT id, answered_questions, correct_answers, answer_details_available, ended_at, completion_reason, target_questions,

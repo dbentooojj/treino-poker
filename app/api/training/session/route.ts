@@ -8,6 +8,7 @@ import {
   finishTrainingSession,
   getActiveTrainingSession,
   getTrainingReport,
+  getTrainingReportSpot,
   type SessionStartRequest,
 } from "../../../../db/training";
 import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingType, type TrainingConfig } from "../../../../lib/training";
@@ -24,6 +25,12 @@ export async function GET(request: Request) {
     }
     const sessionId = searchParams.get("id");
     if (!validId(sessionId)) return Response.json({ error: "Sessão inválida." }, { status: 400 });
+    const rangeQuestion = searchParams.get("rangeQuestion");
+    if (rangeQuestion !== null) {
+      const questionIndex = Number(rangeQuestion);
+      if (!Number.isSafeInteger(questionIndex) || questionIndex < 0) return Response.json({ error: "Decisão inválida." }, { status: 400 });
+      return Response.json({ spot: await getTrainingReportSpot(user.id, sessionId, questionIndex) }, noStore());
+    }
     const activeSession = await getActiveTrainingSession(user.id, sessionId);
     if (activeSession) return Response.json({ session: activeSession }, noStore());
     return Response.json({ report: await getTrainingReport(user.id, sessionId) }, noStore());
@@ -57,13 +64,21 @@ export async function PATCH(request: Request) {
     if (payload.operation !== "ANSWER" || !Number.isSafeInteger(payload.questionIndex) || Number(payload.questionIndex) < 0 || !validId(payload.trainingNodeId) || !validId(payload.trainingHandId) || typeof payload.selectedAction !== "string" || payload.selectedAction.length > 100) {
       return Response.json({ error: "Resposta inválida." }, { status: 400 });
     }
-    return Response.json(await answerTrainingSession(user.id, {
+    const result = await answerTrainingSession(user.id, {
       sessionId: payload.sessionId,
       questionIndex: Number(payload.questionIndex),
       trainingNodeId: payload.trainingNodeId,
       trainingHandId: payload.trainingHandId,
       selectedAction: payload.selectedAction,
-    }), noStore());
+    });
+    return Response.json({
+      answer: result.answer,
+      answeredQuestions: result.answeredQuestions,
+      correctAnswers: result.correctAnswers,
+      nextExercise: result.nextExercise,
+      report: result.report,
+      replayed: result.replayed,
+    }, noStore());
   } catch (error) {
     return errorResponse(error, "Não foi possível salvar a resposta.");
   }
@@ -76,7 +91,7 @@ function parseStartRequest(value: unknown): SessionStartRequest | null {
     return validId(payload.sourceSessionId) ? { mode: payload.mode, sourceSessionId: payload.sourceSessionId } : null;
   }
   const config = payload.config as Partial<TrainingConfig> | undefined;
-  if (!config || !isTrainingType(config.trainingType) || !isEquityModel(config.equityModel) || !isQuestionCount(config.targetQuestions)) return null;
+  if (!config || (config.trainingType !== null && !isTrainingType(config.trainingType)) || !isEquityModel(config.equityModel) || !isQuestionCount(config.targetQuestions)) return null;
   if (config.stackDepthBb !== undefined && (!Number.isFinite(config.stackDepthBb) || config.stackDepthBb <= 0)) return null;
   if (config.heroPosition !== undefined && !isTrainingPosition(config.heroPosition)) return null;
   return { mode: "START", config: {
