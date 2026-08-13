@@ -1,14 +1,15 @@
 import { and, eq, gt, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
-import { authRateLimits, passwordResetTokens, sessions, users } from "./schema";
+import { authRateLimits, emailVerificationTokens, passwordResetTokens, sessions, users } from "./schema";
 import { publicAppOrigin, secureCookiesRequired } from "../lib/server-config";
 
 const SESSION_COOKIE = "rangelab_session";
 const PASSWORD_ITERATIONS = 310_000;
 const SESSION_DAY_SECONDS = 60 * 60 * 24;
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
-const RESET_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const EMAIL_VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export type AuthUser = {
   id: string;
@@ -33,20 +34,31 @@ export async function registerUser(name: string, email: string, password: string
   const { hash, salt } = await hashPassword(password);
   const id = crypto.randomUUID();
   const now = new Date();
+  const verificationToken = randomToken(32);
+  const verificationId = await hashToken(verificationToken);
 
   try {
-    await db.insert(users).values({
-      id,
-      name: name.trim(),
-      email: normalizedEmail,
-      passwordHash: hash,
-      passwordSalt: salt,
-      passwordIterations: PASSWORD_ITERATIONS,
-      role: "user",
-      createdAt: now,
-      updatedAt: now,
+    await db.transaction(async (tx) => {
+      await tx.insert(users).values({
+        id,
+        name: name.trim(),
+        email: normalizedEmail,
+        passwordHash: hash,
+        passwordSalt: salt,
+        passwordIterations: PASSWORD_ITERATIONS,
+        role: "user",
+        emailVerifiedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await tx.insert(emailVerificationTokens).values({
+        id: verificationId,
+        userId: id,
+        expiresAt: new Date(now.getTime() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
+        createdAt: now,
+      });
     });
-    return { id, name: name.trim(), email: normalizedEmail, role: "user" } satisfies AuthUser;
+    return { id, name: name.trim(), email: normalizedEmail, role: "user", verificationToken } satisfies AuthUser & { verificationToken: string };
   } catch (error) {
     if (hasPostgresErrorCode(error, "23505")) throw new Error("EMAIL_IN_USE");
     throw error;
@@ -73,6 +85,7 @@ export async function createInitialAdmin(name: string, email: string, password: 
         passwordSalt: salt,
         passwordIterations: PASSWORD_ITERATIONS,
         role: "admin",
+        emailVerifiedAt: now,
         createdAt: now,
         updatedAt: now,
       });
@@ -85,7 +98,12 @@ export async function createInitialAdmin(name: string, email: string, password: 
   }
 }
 
-export async function authenticateUser(email: string, password: string): Promise<AuthUser | null> {
+export type AuthenticationResult =
+  | { status: "AUTHENTICATED"; user: AuthUser }
+  | { status: "EMAIL_NOT_VERIFIED" }
+  | { status: "INVALID_CREDENTIALS" };
+
+export async function authenticateUserAttempt(email: string, password: string): Promise<AuthenticationResult> {
   const [row] = await getDb().select({
     id: users.id,
     name: users.name,
@@ -94,13 +112,20 @@ export async function authenticateUser(email: string, password: string): Promise
     passwordHash: users.passwordHash,
     passwordSalt: users.passwordSalt,
     passwordIterations: users.passwordIterations,
+    emailVerifiedAt: users.emailVerifiedAt,
   }).from(users).where(eq(users.email, normalizeEmail(email))).limit(1);
   if (!row) {
     await hashPassword(password);
-    return null;
+    return { status: "INVALID_CREDENTIALS" };
   }
-  if (!await verifyPassword(password, row.passwordSalt, row.passwordHash, row.passwordIterations)) return null;
-  return toAuthUser(row);
+  if (!await verifyPassword(password, row.passwordSalt, row.passwordHash, row.passwordIterations)) return { status: "INVALID_CREDENTIALS" };
+  if (!row.emailVerifiedAt) return { status: "EMAIL_NOT_VERIFIED" };
+  return { status: "AUTHENTICATED", user: toAuthUser(row) };
+}
+
+export async function authenticateUser(email: string, password: string): Promise<AuthUser | null> {
+  const result = await authenticateUserAttempt(email, password);
+  return result.status === "AUTHENTICATED" ? result.user : null;
 }
 
 export async function createSession(userId: string, remember: boolean) {
@@ -123,7 +148,7 @@ export async function getSessionUser(request: Request): Promise<AuthUser | null>
   const [user] = await getDb().select({ id: users.id, name: users.name, email: users.email, role: users.role })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
-    .where(and(eq(sessions.id, id), gt(sessions.expiresAt, now)))
+    .where(and(eq(sessions.id, id), gt(sessions.expiresAt, now), sql`${users.emailVerifiedAt} IS NOT NULL`))
     .limit(1);
   if (!user) return null;
   await getDb().update(sessions).set({ lastUsedAt: now }).where(eq(sessions.id, id));
@@ -151,6 +176,47 @@ export async function createPasswordReset(email: string): Promise<string | null>
   return token;
 }
 
+export async function createEmailVerification(email: string): Promise<{ email: string; token: string } | null> {
+  const normalizedEmail = normalizeEmail(email);
+  const [user] = await getDb().select({ id: users.id, email: users.email, emailVerifiedAt: users.emailVerifiedAt })
+    .from(users)
+    .where(eq(users.email, normalizedEmail))
+    .limit(1);
+  if (!user || user.emailVerifiedAt) return null;
+  const token = randomToken(32);
+  const id = await hashToken(token);
+  const now = new Date();
+  await getDb().insert(emailVerificationTokens)
+    .values({ id, userId: user.id, expiresAt: new Date(now.getTime() + EMAIL_VERIFICATION_TOKEN_TTL_MS), createdAt: now })
+    .onConflictDoUpdate({
+      target: emailVerificationTokens.userId,
+      set: { id, expiresAt: new Date(now.getTime() + EMAIL_VERIFICATION_TOKEN_TTL_MS), createdAt: now },
+    });
+  await getDb().delete(emailVerificationTokens).where(and(ne(emailVerificationTokens.userId, user.id), lte(emailVerificationTokens.expiresAt, now)));
+  return { email: user.email, token };
+}
+
+export async function verifyEmail(token: string) {
+  if (!isEmailVerificationToken(token)) return false;
+  const id = await hashToken(token);
+  const now = new Date();
+  return getDb().transaction(async (tx) => {
+    const [claimed] = await tx.delete(emailVerificationTokens)
+      .where(and(eq(emailVerificationTokens.id, id), gt(emailVerificationTokens.expiresAt, now)))
+      .returning({ userId: emailVerificationTokens.userId });
+    if (!claimed) return false;
+    const [verified] = await tx.update(users)
+      .set({ emailVerifiedAt: now, updatedAt: now })
+      .where(and(eq(users.id, claimed.userId), sql`${users.emailVerifiedAt} IS NULL`))
+      .returning({ id: users.id });
+    return Boolean(verified);
+  });
+}
+
+export function isEmailVerificationToken(value: unknown): value is string {
+  return typeof value === "string" && AUTH_TOKEN_PATTERN.test(value);
+}
+
 export async function resetPassword(token: string, password: string) {
   if (!isPasswordResetToken(token)) return false;
   const id = await hashToken(token);
@@ -176,11 +242,11 @@ export async function resetPassword(token: string, password: string) {
 }
 
 export function isPasswordResetToken(value: unknown): value is string {
-  return typeof value === "string" && RESET_TOKEN_PATTERN.test(value);
+  return typeof value === "string" && AUTH_TOKEN_PATTERN.test(value);
 }
 
 export type AccountUpdateResult =
-  | { ok: true; user: AuthUser }
+  | { ok: true; user: AuthUser; verificationToken?: string }
   | { ok: false; reason: "NOT_FOUND" | "INVALID_PASSWORD" | "EMAIL_IN_USE" };
 
 export async function updateUserProfile(userId: string, name: string, email: string, currentPassword: string): Promise<AccountUpdateResult> {
@@ -195,13 +261,36 @@ export async function updateUserProfile(userId: string, name: string, email: str
     const [existing] = await getDb().select({ id: users.id }).from(users).where(and(eq(users.email, normalizedEmail), ne(users.id, userId))).limit(1);
     if (existing) return { ok: false, reason: "EMAIL_IN_USE" };
   }
+  const emailChanged = normalizedEmail !== row.email;
+  const verificationToken = emailChanged ? randomToken(32) : undefined;
+  const verificationId = verificationToken ? await hashToken(verificationToken) : undefined;
   try {
-    await getDb().update(users).set({ name: name.trim(), email: normalizedEmail, updatedAt: new Date() }).where(eq(users.id, userId));
+    await getDb().transaction(async (tx) => {
+      const now = new Date();
+      await tx.update(users).set({
+        name: name.trim(),
+        email: normalizedEmail,
+        ...(emailChanged ? { emailVerifiedAt: null } : {}),
+        updatedAt: now,
+      }).where(eq(users.id, userId));
+      if (emailChanged && verificationToken && verificationId) {
+        await tx.insert(emailVerificationTokens).values({
+          id: verificationId,
+          userId,
+          expiresAt: new Date(now.getTime() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
+          createdAt: now,
+        }).onConflictDoUpdate({
+          target: emailVerificationTokens.userId,
+          set: { id: verificationId, expiresAt: new Date(now.getTime() + EMAIL_VERIFICATION_TOKEN_TTL_MS), createdAt: now },
+        });
+        await tx.delete(sessions).where(eq(sessions.userId, userId));
+      }
+    });
   } catch (error) {
     if (hasPostgresErrorCode(error, "23505")) return { ok: false, reason: "EMAIL_IN_USE" };
     throw error;
   }
-  return { ok: true, user: { id: row.id, name: name.trim(), email: normalizedEmail, role: row.role } };
+  return { ok: true, user: { id: row.id, name: name.trim(), email: normalizedEmail, role: row.role }, ...(verificationToken ? { verificationToken } : {}) };
 }
 
 export async function changeUserPassword(userId: string, currentPassword: string, newPassword: string) {

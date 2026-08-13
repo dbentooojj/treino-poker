@@ -50,6 +50,13 @@
       "when": 1786413600000,
       "tag": "0006_archived_study_reimport",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786636800000,
+      "tag": "0007_email_verification",
+      "breakpoints": true
     }
   ]
 }

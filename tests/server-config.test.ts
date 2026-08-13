@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { authRateLimitClientIp, clearSessionCookie, isPasswordResetToken, sessionCookie } from "../db/auth";
+import { authRateLimitClientIp, clearSessionCookie, isEmailVerificationToken, isPasswordResetToken, sessionCookie } from "../db/auth";
 import { register } from "../instrumentation";
 import { publicAppOrigin, secureCookiesRequired, validateProductionConfiguration } from "../lib/server-config";
 
@@ -97,6 +97,13 @@ test("token de recuperação aceita somente os 32 bytes em base64url emitidos pe
   assert.equal(isPasswordResetToken("A".repeat(44)), false);
   assert.equal(isPasswordResetToken(`${"A".repeat(42)}=`), false);
   assert.equal(isPasswordResetToken(123), false);
+});
+
+test("token de confirmação usa o mesmo formato aleatório estrito", () => {
+  assert.equal(isEmailVerificationToken("A".repeat(43)), true);
+  assert.equal(isEmailVerificationToken("A".repeat(42)), false);
+  assert.equal(isEmailVerificationToken(`${"A".repeat(42)}=`), false);
+  assert.equal(isEmailVerificationToken(null), false);
 });
 
 test("instrumentation falha antes do servidor aceitar tráfego com configuração insegura", () => {

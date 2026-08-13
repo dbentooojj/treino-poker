@@ -32,13 +32,13 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   await migrate(getDb(), { migrationsFolder: "drizzle" });
   const sqlClient = getSqlClient();
   const [{ count: migrationCount }] = await sqlClient<{ count: number }[]>`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-  assert.equal(migrationCount, 7, "as migrations devem ser aplicadas");
+  assert.equal(migrationCount, 8, "as migrations devem ser aplicadas");
 
   const [{ data_type: hashType }] = await sqlClient<{ data_type: string }[]>`
     SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'training_sets' AND column_name = 'content_hash'`;
   assert.equal(hashType, "text", "content_hash deve existir");
 
-  const { registerUser, createInitialAdmin, authenticateUser, createSession, createPasswordReset, resetPassword } = await import("../db/auth");
+  const { registerUser, createInitialAdmin, authenticateUser, authenticateUserAttempt, createEmailVerification, verifyEmail, createSession, createPasswordReset, resetPassword } = await import("../db/auth");
   const subtle = crypto.subtle;
   const previousDeriveBitsDescriptor = Object.getOwnPropertyDescriptor(subtle, "deriveBits");
   const originalDeriveBits = subtle.deriveBits.bind(subtle);
@@ -57,6 +57,20 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   }
   const publicUser = await registerUser("Primeiro cadastro", "first@example.com", "Senha forte 123!");
   assert.equal(publicUser.role, "user", "o primeiro cadastro público nunca pode receber privilégios administrativos");
+  assert.equal(await authenticateUser(publicUser.email, "Senha forte 123!"), null, "cadastro pendente não pode entrar");
+  assert.equal((await authenticateUserAttempt(publicUser.email, "Senha forte 123!")).status, "EMAIL_NOT_VERIFIED");
+  const concurrentVerificationTokens = await Promise.all([
+    createEmailVerification(publicUser.email),
+    createEmailVerification(publicUser.email),
+  ]);
+  assert.ok(concurrentVerificationTokens.every(Boolean));
+  const [{ count: activeVerificationTokens }] = await sqlClient<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM email_verification_tokens WHERE user_id = ${publicUser.id}`;
+  assert.equal(activeVerificationTokens, 1, "reenvios concorrentes devem manter somente o link mais recente");
+  const verificationResults = [];
+  for (const verification of concurrentVerificationTokens) verificationResults.push(await verifyEmail(verification!.token));
+  assert.equal(verificationResults.filter(Boolean).length, 1, "somente o link de confirmação mais recente pode ser consumido");
+  assert.equal((await authenticateUser(publicUser.email, "Senha forte 123!"))?.id, publicUser.id, "a confirmação deve liberar o login");
   const adminUser = await createInitialAdmin("Admin", "admin@example.com", "Senha forte 123!");
   assert.equal(adminUser.role, "admin", "o provisionamento operacional explícito deve criar o primeiro admin");
   await assert.rejects(
@@ -505,6 +519,11 @@ async function proveHistoricalSessionUpgrade(adminClient: postgres.Sql, sourceUr
     await applyMigrationSql(upgrade, new URL("../drizzle/0004_young_giant_girl.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0005_quick_training_any.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0006_archived_study_reimport.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0007_email_verification.sql", import.meta.url));
+
+    const [{ email_verified_at: legacyEmailVerifiedAt }] = await upgrade<{ email_verified_at: Date | null }[]>`
+      SELECT email_verified_at FROM users WHERE id = ${userId}`;
+    assert.ok(legacyEmailVerifiedAt, "contas anteriores à confirmação de e-mail devem permanecer verificadas");
 
     const [{ is_nullable: sessionTypeNullable }] = await upgrade<{ is_nullable: string }[]>`
       SELECT is_nullable FROM information_schema.columns

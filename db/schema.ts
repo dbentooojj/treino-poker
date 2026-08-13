@@ -33,6 +33,7 @@ export const users = pgTable("users", {
   passwordSalt: text("password_salt").notNull(),
   passwordIterations: integer("password_iterations").notNull(),
   role: userRole("role").notNull().default("user"),
+  emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [uniqueIndex("users_email_unique").on(table.email)]);
@@ -52,6 +53,13 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
   usedAt: timestamp("used_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [uniqueIndex("password_reset_user_id_unique").on(table.userId), index("password_reset_expires_at_idx").on(table.expiresAt)]);
+
+export const emailVerificationTokens = pgTable("email_verification_tokens", {
+  id: text("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("email_verification_user_id_unique").on(table.userId), index("email_verification_expires_at_idx").on(table.expiresAt)]);
 
 export const authRateLimits = pgTable("auth_rate_limits", {
   id: text("id").primaryKey(),
