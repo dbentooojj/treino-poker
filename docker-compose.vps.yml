@@ -1,0 +1,15 @@
+services:
+  app:
+    container_name: rangelab_app
+    networks:
+      - frontend
+      - backend
+      - web_proxy
+
+  caddy:
+    profiles:
+      - standalone
+
+networks:
+  web_proxy:
+    external: true
