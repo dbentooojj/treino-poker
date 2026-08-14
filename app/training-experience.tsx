@@ -360,13 +360,14 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
       <header><span>Sessão atual</span></header>
       <div className="spot-session-progress">
         <div><span>Progresso</span><b>{progress}</b></div>
+        <progress value={session.targetQuestions ? Math.min(currentHand, session.targetQuestions) : undefined} max={session.targetQuestions ?? undefined} aria-label={`Progresso atual: ${progress}`}/>
       </div>
       <div className="spot-session-stats">
         <div><span>Acerto</span><b>{accuracy === null ? "—" : `${accuracy}%`}</b></div>
         <div><span>Corretas</span><b className="is-positive">{correctAnswers}</b></div>
         <div><span>Erros</span><b className={errors > 0 ? "is-negative" : ""}>{errors}</b></div>
       </div>
-      <div className="spot-session-time"><span>Tempo de treino</span><b>{formatDuration(elapsed)}</b></div>
+      <div className="spot-session-time"><span aria-label="Tempo de treino">Tempo<span className="spot-session-time-detail"> de treino</span></span><b>{formatDuration(elapsed)}</b></div>
       <Button type="button" className="spot-finish-system" variant="danger" size="sm" loading={busy} onClick={finish}><Icon name="logout"/>Finalizar treino</Button>
     </aside>
     <div className="spot-session-main">

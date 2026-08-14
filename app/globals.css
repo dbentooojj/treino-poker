@@ -4383,6 +4383,10 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,su
 .spot-session-sidebar header span { color:var(--text-primary); font-size:var(--text-sm); letter-spacing:0; text-transform:none; }
 .spot-session-progress>div,.spot-session-stats>div,.spot-session-time { display:flex; align-items:baseline; justify-content:space-between; gap:var(--space-3); }
 .spot-session-progress>div>b,.spot-session-time>b { color:var(--text-primary); font-size:var(--text-xs); }
+.spot-session-progress progress { width:100%; height:5px; margin-top:var(--space-2); display:block; overflow:hidden; appearance:none; border:0; border-radius:999px; background:var(--surface-interactive); color:var(--success-text); }
+.spot-session-progress progress::-webkit-progress-bar { border-radius:inherit; background:var(--surface-interactive); }
+.spot-session-progress progress::-webkit-progress-value { border-radius:inherit; background:var(--success-text); }
+.spot-session-progress progress::-moz-progress-bar { border-radius:inherit; background:var(--success-text); }
 .spot-session-stats { display:grid; grid-template-columns:1fr; gap:var(--space-4); }
 .spot-session-stats>div { min-height:0; padding:0; border:0; border-radius:0; background:transparent; }
 .spot-session-stats b { overflow-wrap:anywhere; color:var(--text-primary); font-size:var(--text-xs); }
@@ -4651,19 +4655,36 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,su
   .progress-summary { grid-template-columns:1fr 1fr; }
   .performance-tabs-system { margin-inline:var(--space-3); }
   .training-hub,.training-hub-shell.spot-mode .training-hub,.training-hub-shell.spot-session-mode .training-hub { width:100%; padding-top:var(--page-space-top-mobile); }
+  .training-hub-shell.spot-session-mode { overflow-x:clip; }
+  .training-hub-shell.spot-session-mode .training-hub { padding-top:var(--space-4); padding-bottom:max(var(--page-space-bottom-mobile),calc(env(safe-area-inset-bottom) + var(--space-5))); }
   .training-lobby,.training-hub-shell.spot-mode .training-lobby { border-right:0; border-left:0; border-radius:0; }
   .training-lobby-table,.training-hub-shell.spot-mode .training-lobby-table { padding:0 var(--space-8); overflow:visible; }
   .unified-table-preview { padding:var(--space-3) var(--space-6) var(--space-5); }
-  .inline-training-session { gap:var(--space-3); }
-  .spot-session-sidebar { width:calc(100% - (var(--page-gutter-mobile) * 2)); margin:0 auto; padding:0; grid-template-columns:1fr; gap:var(--space-3); }
-  .spot-session-sidebar header { display:flex; align-items:baseline; justify-content:space-between; padding-bottom:var(--space-3); }
-  .spot-session-stats { grid-template-columns:1fr; }
-  .spot-session-stats>div { min-height:0; padding:0; display:flex; }
+  .inline-training-session { min-width:0; grid-template-columns:minmax(0,1fr); gap:var(--space-4); }
+  .spot-session-sidebar { width:calc(100% - (var(--page-gutter-mobile) * 2)); margin:0 auto; padding:var(--space-3); grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--space-3) 0; border:1px solid var(--border-default); border-radius:var(--radius-lg); background:linear-gradient(145deg,var(--surface-panel),rgba(17,31,26,.78)); box-shadow:var(--shadow-panel); }
+  .spot-session-sidebar header { min-width:0; grid-column:1 / 3; grid-row:1; display:flex; align-items:center; padding:0; }
+  .spot-session-sidebar .spot-finish-system { min-width:0; min-height:44px; grid-column:3 / 5; grid-row:1; justify-self:end; width:auto; max-width:100%; padding-inline:var(--space-3); font-size:11px; }
+  .spot-session-sidebar .spot-finish-system svg { width:16px; height:16px; flex-basis:16px; }
+  .spot-session-progress { grid-column:1 / -1; min-width:0; }
+  .spot-session-stats { grid-column:1 / 4; grid-row:3; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; }
+  .spot-session-stats>div,.spot-session-time { min-width:0; min-height:42px; padding:0 var(--space-2); display:grid; align-content:space-between; justify-items:start; gap:var(--space-1); border-left:1px solid var(--border-subtle); }
+  .spot-session-stats>div:first-child { padding-left:0; border-left:0; }
+  .spot-session-time { grid-column:4; grid-row:3; }
+  .spot-session-time-detail { display:none; }
   .spot-session-stats b { font-size:var(--text-xs); }
-  .spot-training-decision { padding-inline:var(--page-gutter-mobile); }
-  .spot-table-stage { padding:var(--space-8) var(--space-6); }
-  .spot-action-panel { width:100%; }
+  .spot-session-main { width:100%; min-width:0; }
+  .spot-training-decision { min-width:0; gap:var(--space-4); padding:0 var(--page-gutter-mobile) max(var(--page-space-bottom-mobile),calc(env(safe-area-inset-bottom) + var(--space-5))); }
+  .spot-table-stage { width:100%; padding:var(--space-8) var(--space-3) var(--space-4); }
+  .spot-table-stage .play-table-frame { max-width:520px; margin-inline:auto; }
+  .spot-poker-table .play-action-tag { max-width:72px; white-space:normal; overflow-wrap:anywhere; line-height:1.15; text-align:center; }
+  .spot-poker-table .play-seat--hero .play-hole-cards { left:50%; top:auto; bottom:calc(100% + var(--space-1)); transform:translateX(-50%) scale(.82); transform-origin:center bottom; }
+  .spot-action-panel { width:100%; margin-bottom:0; padding:0; border:0; border-radius:0; background:transparent; box-shadow:none; }
+  .spot-action-panel .play-action-copy { min-height:0; margin-bottom:var(--space-4); padding-inline:var(--space-1); }
+  .spot-action-panel .play-action-copy>span { margin-bottom:var(--space-2); }
+  .spot-action-panel .play-action-copy>strong { line-height:1.45; overflow:visible; text-overflow:clip; }
+  .spot-action-panel .play-action-copy>small { margin-top:var(--space-2); overflow:visible; text-overflow:clip; white-space:normal; }
   .spot-action-panel .play-action-buttons { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .spot-action-panel .play-action-button { min-height:58px; }
   .report-stat-grid { grid-template-columns:1fr 1fr; }
   .report-grid { grid-template-columns:1fr; }
   .training-report-redesigned { width:calc(100% - (var(--page-gutter-mobile) * 2)); }
@@ -4694,10 +4715,11 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,su
   .training-lobby-table,.training-hub-shell.spot-mode .training-lobby-table { padding-inline:var(--space-5); }
   .unified-table-preview { padding:var(--space-3) var(--space-5) var(--space-5); }
   .unified-table-preview .play-table-frame,.spot-table-stage .play-table-frame { aspect-ratio:1.65; }
-  .spot-table-stage { padding:var(--space-8) var(--space-5); }
+  .spot-table-stage { padding:var(--space-8) var(--space-3) var(--space-4); }
   .unified-training-table .play-seat,.unified-training-table .play-player-box,.unified-training-table[data-seat-count="9"] .play-seat,.unified-training-table[data-seat-count="10"] .play-seat,.unified-training-table[data-seat-count="9"] .play-player-box,.unified-training-table[data-seat-count="10"] .play-player-box { width:44px; height:44px; }
   .unified-training-table .play-player-box>strong,.unified-training-table[data-seat-count="9"] .play-player-box>strong,.unified-training-table[data-seat-count="10"] .play-player-box>strong { font-size:10px; }
   .unified-training-table .play-hole-cards { transform:scale(.86); transform-origin:left center; }
+  .spot-poker-table .play-seat--hero .play-hole-cards { transform:translateX(-50%) scale(.78); transform-origin:center bottom; }
   .quick-preflop-action>div { grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--space-1); }
   .quick-setup-actions { align-items:stretch; flex-direction:column-reverse; }
   .quick-setup-actions [class] { width:100%; }
@@ -4709,6 +4731,12 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,su
 }
 
 @media (max-width:390px) {
+  .spot-session-sidebar { padding-inline:10px; }
+  .spot-session-sidebar .spot-finish-system { padding-inline:var(--space-2); }
+  .spot-session-stats>div,.spot-session-time { padding-inline:6px; }
+  .spot-session-stats>div:first-child { padding-left:0; }
+  .spot-table-stage { padding-inline:10px; }
+  .spot-action-panel .play-action-copy>strong { font-size:13px; }
   .inline-card-picker .card-picker-row { grid-template-columns:1fr; }
   .inline-card-picker .picker-suit { justify-content:flex-start; }
   .decision-outcomes,.decision-summary { grid-template-columns:1fr; }

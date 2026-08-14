@@ -244,13 +244,14 @@ test("spots e mão completa usam os mesmos componentes visuais", async () => {
 });
 
 test("treinar mantém mão completa indisponível sem cenários demonstrativos", async () => {
-  const [header, appHeader, legacyPlay, workspace, trainer, playTrainer] = await Promise.all([
+  const [header, appHeader, legacyPlay, workspace, trainer, playTrainer, styles] = await Promise.all([
     readFile(new URL("../app/member-header.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ui/AppHeader.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/jogar/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/treinar/training-workspace.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/play/PlayTrainer.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
   assert.match(header, /<AppHeader/);
   assert.match(appHeader, /href: "\/treinar", label: "Treinar"/);
@@ -264,6 +265,7 @@ test("treinar mantém mão completa indisponível sem cenários demonstrativos",
   assert.doesNotMatch(playTrainer, /MOCK_HANDS|MTT · ChipEV/);
   assert.match(trainer, /className="inline-training-session"/);
   assert.match(trainer, /className="spot-session-sidebar"/);
+  assert.match(trainer, /<progress value=\{session\.targetQuestions/);
   for (const label of ["Sessão atual", "Progresso", "Acerto", "Corretas", "Erros", "Tempo de treino"]) assert.match(trainer, new RegExp(label));
   assert.doesNotMatch(trainer, /EV do treino/);
   assert.doesNotMatch(trainer, /className="spot-session-toolbar"/);
@@ -274,6 +276,11 @@ test("treinar mantém mão completa indisponível sem cenários demonstrativos",
   assert.match(trainer, /options\.trainingTypes\.length > 0/);
   assert.match(trainer, /trainingType: filters\.trainingType \?\? null/);
   assert.match(trainer, /Todos os spots/);
+  assert.match(styles, /\.inline-training-session \{ min-width:0; grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(styles, /\.training-hub-shell\.spot-session-mode \{ overflow-x:clip; \}/);
+  assert.match(styles, /\.spot-session-sidebar \{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)[^}]*border:1px solid var\(--border-default\)/);
+  assert.match(styles, /\.spot-table-stage \.play-table-frame \{ max-width:520px; margin-inline:auto; \}/);
+  assert.match(styles, /env\(safe-area-inset-bottom\)/);
 });
 
 test("prévia da mesa renderiza somente o contexto recebido de um estudo real", () => {
