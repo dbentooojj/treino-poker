@@ -408,7 +408,7 @@ export function classifyHrcNode(node: HrcNode, settingsOrStacks: HrcSettings | n
 function classifyHrcNodeDetailed(node: HrcNode, context: HrcPreflopContext): { trainingType: TrainingType | null; reason: HrcIgnoredReason | null } {
   if (node.street !== 0) return { trainingType: null, reason: "POSTFLOP" };
   if (isAutomaticXNode(node)) return { trainingType: null, reason: "AUTOMATIC_X" };
-  if (node.player < 0 || node.actions.length < 2 || node.actions.some((action) => action.type === "X")) {
+  if (node.player < 0 || node.actions.length < 2) {
     return { trainingType: null, reason: "NON_TRAINABLE" };
   }
   if (node.eligibleHandCount === 0) return { trainingType: null, reason: "NO_ELIGIBLE_HANDS" };
@@ -623,10 +623,8 @@ function parsePreflopHands(rawValue: unknown, actions: HrcAction[], children: nu
     hands[handClass] = { weight, played, evs, metadata: withoutKeys(hand, ["weight", "played", "evs"]) };
   }
   if (actions.length && !Object.keys(hands).length) throw new HrcImportError(`Node ${sourcePath} não contém classes de mãos válidas.`);
-  if (actions.some((action) => action.type === "X")) {
-    const isValidAutomaticX = actions.length === 1
-      && actions[0].type === "X"
-      && actions[0].amount === 0
+  if (actions.length === 1 && actions[0].type === "X") {
+    const isValidAutomaticX = actions[0].amount === 0
       && children === 1
       && rawHandClasses.length === CANONICAL_HAND_CLASSES.size
       && Object.keys(hands).length === CANONICAL_HAND_CLASSES.size
@@ -673,6 +671,7 @@ function toTrainingAction(
   const id = `action-${index}`;
   const metadata = { ...action.metadata, hrcType: action.type, hrcAmount: action.amount, ...(action.node === undefined ? {} : { hrcChildNode: action.node }) };
   if (action.type === "F") return { id, type: "FOLD", metadata };
+  if (action.type === "X") return { id, type: "CHECK", label: "Check", metadata };
   if (action.type === "C") {
     if (action.amount <= 0) return { id, type: "CHECK", metadata };
     const priorSequence = sequenceAction ? node.sequence.slice(0, index) : node.sequence;
@@ -692,7 +691,10 @@ function toTrainingAction(
 }
 
 function isAutomaticXNode(node: HrcNode) {
-  return node.actions.length === 1 && node.actions[0].type === "X";
+  return node.actions.length === 1
+    && node.actions[0].type === "X"
+    && node.actions[0].amount === 0
+    && node.children === 1;
 }
 
 function isAllInRaise(

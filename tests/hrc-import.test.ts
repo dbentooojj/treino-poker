@@ -26,6 +26,17 @@ const effectiveBbaSettings = {
   },
 };
 
+const realCompleteExportSettings = {
+  ...settings,
+  handdata: {
+    ...settings.handdata,
+    stacks: Array.from({ length: 8 }, () => 200_000),
+    blinds: [10_000, 5_000, 10_000],
+    anteType: "BB Ante",
+    anteMode: "Ante First",
+  },
+};
+
 const foldsToSmallBlind = Array.from({ length: 6 }, (_, player) => ({
   player,
   street: 0,
@@ -130,10 +141,88 @@ test("aceita X automático, ignora o node estrutural e registra ignoredNodes.AUT
 
   assert.equal(pack.nodes.length, 2);
   assert.equal(study.nodes.length, 1);
+  assert.equal(study.sourceNodes[1].ignoredReason, "AUTOMATIC_X");
   const expected = { POSTFLOP: 0, AUTOMATIC_X: 1, UNSUPPORTED_SEQUENCE: 0, NO_ELIGIBLE_HANDS: 0, NON_TRAINABLE: 0 };
   assert.deepEqual(study.ignoredNodes, expected);
   assert.deepEqual(study.metadata.ignoredNodes, expected);
   assert.deepEqual(summary.ignoredNodes, expected);
+});
+
+test("Complete Export importa X automático e X real como check no mesmo pacote", async () => {
+  const mixedCheckNode = {
+    player: 7,
+    street: 0,
+    children: 4,
+    sequence: [
+      ...foldsToSmallBlind,
+      { player: 6, street: 0, type: "C", amount: 5_000 },
+    ],
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "X", amount: 0 },
+      { type: "R", amount: 30_000, node: 8 },
+      { type: "R", amount: 190_000, node: 10 },
+    ],
+    hands: strategyHands([0.1, 0.2, 0.3, 0.4], [-1, 0, 1, 2]),
+  };
+  const automaticNode = {
+    ...automaticXNode,
+    player: 7,
+    sequence: foldsToSmallBlind,
+  };
+  const file = zipFile({
+    "settings.json": JSON.stringify(realCompleteExportSettings),
+    "nodes/7.json": JSON.stringify(mixedCheckNode),
+    "nodes/8.json": JSON.stringify(automaticNode),
+  });
+
+  const pack = await parseHrcPack(file);
+  const study = toHrcStudyImport(pack);
+  const mixedSource = study.sourceNodes.find((node) => node.sourceNodeId === "7");
+  const automaticSource = study.sourceNodes.find((node) => node.sourceNodeId === "8");
+
+  assert.equal(pack.nodes.length, 2);
+  assert.equal(study.sourceNodes.length, 2);
+  assert.equal(study.nodes.length, 0, "VS_LIMP ainda não deve gerar trainingHands");
+  assert.equal(mixedSource?.ignoredReason, "UNSUPPORTED_SEQUENCE");
+  assert.deepEqual(mixedSource?.sequence, mixedCheckNode.sequence.map((action) => ({ ...action, metadata: {} })));
+  assert.deepEqual(mixedSource?.actions.map((action) => [action.type, action.amount, action.node]), [
+    ["F", 0, undefined],
+    ["X", 0, undefined],
+    ["R", 30_000, 8],
+    ["R", 190_000, 10],
+  ]);
+  assert.equal(automaticSource?.ignoredReason, "AUTOMATIC_X");
+  assert.equal(study.ignoredNodes.AUTOMATIC_X, 1);
+  assert.equal(study.ignoredNodes.UNSUPPORTED_SEQUENCE, 1);
+});
+
+test("X misto é convertido em Check e R19 permanece All-in efetivo", async () => {
+  const node = {
+    player: 7,
+    street: 0,
+    children: 4,
+    sequence: foldsToSmallBlind,
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "X", amount: 0 },
+      { type: "R", amount: 30_000 },
+      { type: "R", amount: 190_000 },
+    ],
+    hands: strategyHands([0.1, 0.2, 0.3, 0.4], [-1, 0, 1, 2]),
+  };
+
+  const study = await studyFromNodes([node], realCompleteExportSettings);
+
+  assert.equal(study.nodes[0].trainingType, "OPEN_FOLD");
+  assert.deepEqual(study.nodes[0].availableActions.map(({ type, label }) => ({ type, label })), [
+    { type: "FOLD", label: undefined },
+    { type: "CHECK", label: "Check" },
+    { type: "RAISE", label: undefined },
+    { type: "RAISE", label: "All-in" },
+  ]);
+  assert.equal(study.nodes[0].availableActions[3].amountBb, 19);
+  assert.equal(study.ignoredNodes.AUTOMATIC_X, 0);
 });
 
 test("rejeita X que não segue integralmente o padrão automático", async (context) => {
