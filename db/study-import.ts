@@ -1,8 +1,8 @@
 import { and, eq, ne } from "drizzle-orm";
-import type { HrcStudyImport } from "../lib/hrc-import";
+import { normalizeHrcNodeReference, type HrcStudyImport } from "../lib/hrc-import";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
-import { trainingHands, trainingNodes, trainingSets } from "./schema";
+import { hrcSourceEdges, hrcSourceNodes, trainingHands, trainingNodes, trainingSets } from "./schema";
 
 export type PersistedHrcStudy = {
   id: string;
@@ -49,6 +49,18 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     metadata: node.metadata,
   }));
   const nodeTypes = [...new Set(study.nodes.map((node) => node.trainingType))];
+  const trainingNodeIds = new Map(nodeRows.map((node) => [node.nodeKey, node.id]));
+  const sourceRowIds = study.sourceNodes.map(() => crypto.randomUUID());
+  const sourceNodeIdsByReference = new Map<string, string | null>();
+  study.sourceNodes.forEach((node, index) => {
+    for (const reference of [node.sourceNodeId, node.sourcePath]) {
+      const normalized = normalizeHrcNodeReference(reference);
+      if (!normalized) continue;
+      const existing = sourceNodeIdsByReference.get(normalized);
+      if (existing === undefined || existing === sourceRowIds[index]) sourceNodeIdsByReference.set(normalized, sourceRowIds[index]);
+      else sourceNodeIdsByReference.set(normalized, null);
+    }
+  });
 
   try {
     await db.transaction(async (tx) => {
@@ -89,6 +101,54 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
         }));
         for (const chunk of chunks(handRows, 1_000)) await tx.insert(trainingHands).values(chunk);
       }
+      for (let start = 0; start < study.sourceNodes.length; start += 1_000) {
+        const sourceRows = study.sourceNodes.slice(start, start + 1_000).map((node, offset) => ({
+          id: sourceRowIds[start + offset],
+          trainingSetId: setId,
+          trainingNodeId: node.trainingNodeKey ? trainingNodeIds.get(node.trainingNodeKey) ?? null : null,
+          sourceNodeId: node.sourceNodeId,
+          sourcePath: node.sourcePath,
+          player: node.player,
+          street: node.street,
+          actionSequence: node.sequence,
+          actions: node.actions,
+          isTrainable: node.trainingNodeKey !== null,
+          metadata: { ...node.metadata, ignoredReason: node.ignoredReason },
+        }));
+        await tx.insert(hrcSourceNodes).values(sourceRows);
+      }
+      let sourceEdgeBatch: Array<{
+        id: string;
+        trainingSetId: string;
+        parentNodeId: string;
+        actionIndex: number;
+        childReference: string;
+        childNodeId: string | null;
+        metadata: Record<string, unknown>;
+      }> = [];
+      for (let nodeIndex = 0; nodeIndex < study.sourceNodes.length; nodeIndex++) {
+        const node = study.sourceNodes[nodeIndex];
+        for (let actionIndex = 0; actionIndex < node.actions.length; actionIndex++) {
+          const action = node.actions[actionIndex];
+          if (action.node === undefined) continue;
+          const childReference = String(action.node);
+          const normalizedChildReference = normalizeHrcNodeReference(action.node);
+          sourceEdgeBatch.push({
+            id: crypto.randomUUID(),
+            trainingSetId: setId,
+            parentNodeId: sourceRowIds[nodeIndex],
+            actionIndex,
+            childReference,
+            childNodeId: normalizedChildReference ? sourceNodeIdsByReference.get(normalizedChildReference) ?? null : null,
+            metadata: { hrcType: action.type, hrcAmount: action.amount, ...action.metadata },
+          });
+          if (sourceEdgeBatch.length === 1_000) {
+            await tx.insert(hrcSourceEdges).values(sourceEdgeBatch);
+            sourceEdgeBatch = [];
+          }
+        }
+      }
+      if (sourceEdgeBatch.length) await tx.insert(hrcSourceEdges).values(sourceEdgeBatch);
     });
   } catch (error) {
     if (hasPostgresErrorCode(error, "23505")) {
@@ -116,8 +176,6 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
   };
 }
 
-function chunks<T>(rows: T[], size: number) {
-  const result: T[][] = [];
-  for (let index = 0; index < rows.length; index += size) result.push(rows.slice(index, index + size));
-  return result;
+function* chunks<T>(rows: T[], size: number) {
+  for (let index = 0; index < rows.length; index += size) yield rows.slice(index, index + size);
 }

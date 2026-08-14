@@ -1,6 +1,6 @@
 import { getSessionUser, isTrustedOrigin } from "../../../../db/auth";
 import { DuplicateHrcStudyError, getStudiesAdminData, importHrcStudy } from "../../../../db/studies";
-import { HrcImportError, parseHrcPack, summarizeHrcStudy, toHrcStudyImport } from "../../../../lib/hrc-import";
+import { HrcImportError, parseHrcPack, summarizeHrcStudy, toHrcStudyImport, type HrcPack } from "../../../../lib/hrc-import";
 
 export async function POST(request: Request) {
   try {
@@ -12,16 +12,9 @@ export async function POST(request: Request) {
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
       return Response.json({ error: "Envie o ZIP em multipart/form-data." }, { status: 415 });
     }
-    let formData: FormData;
-    try { formData = await request.formData(); }
-    catch { throw new HrcImportError("Não foi possível ler o arquivo enviado."); }
-    const upload = formData.get("file");
-    if (!(upload instanceof File)) throw new HrcImportError("Selecione um ZIP exportado pelo HRC.");
-
     const startedAt = Date.now();
-    console.info("[HRC import] início", { fileName: upload.name, sizeBytes: upload.size, adminId: user.id });
-    const pack = await parseHrcPack(upload);
-    const parsedStudy = toHrcStudyImport(pack);
+    const pack = await readHrcUpload(request, user.id);
+    const parsedStudy = toHrcStudyImport(pack, { releaseRawHands: true });
     const summary = summarizeHrcStudy(parsedStudy);
     console.info("[HRC import] estudo reconhecido", {
       name: parsedStudy.name,
@@ -51,4 +44,16 @@ export async function POST(request: Request) {
     console.error("[HRC import] erro", { message });
     return Response.json({ error: "Não foi possível salvar o estudo no banco de dados. Nenhum dado foi importado." }, { status: 500 });
   }
+}
+
+async function readHrcUpload(request: Request, adminId: string): Promise<HrcPack> {
+  // request.formData() e File.arrayBuffer() mantêm o multipart e o ZIP completo
+  // em memória durante o parse. Este fluxo é deliberadamente limitado, mas não é streaming.
+  let formData: FormData;
+  try { formData = await request.formData(); }
+  catch { throw new HrcImportError("Não foi possível ler o arquivo enviado."); }
+  const upload = formData.get("file");
+  if (!(upload instanceof File)) throw new HrcImportError("Selecione um ZIP exportado pelo HRC.");
+  console.info("[HRC import] início", { fileName: upload.name, sizeBytes: upload.size, adminId });
+  return parseHrcPack(upload);
 }

@@ -63,6 +63,14 @@ test("converte identificadores HRC nos nomes reais das ações", () => {
   assert.equal(resolvedActionLabel("action-2", actions, context), "3-bet 6 BB");
 });
 
+test("labels distinguem Complete e níveis de re-raise", () => {
+  const complete: TrainingAction = { id: "complete", type: "CALL", label: "Complete", amountBb: 1 };
+  const raise: TrainingAction = { id: "raise", type: "RAISE", amountBb: 12 };
+  assert.equal(resolvedActionLabel(complete, [complete], { heroStackBb: 20, trainingType: "OPEN_FOLD" }), "Complete");
+  assert.equal(resolvedActionLabel(raise, [raise], { heroStackBb: 20, trainingType: "VS_3_BET" }), "4-bet 12 BB");
+  assert.equal(resolvedActionLabel(raise, [raise], { heroStackBb: 20, trainingType: "VS_4_BET" }), "5-bet 12 BB");
+});
+
 test("avaliação aceita toda ação com frequência relevante em mixed strategies", () => {
   const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "shove", type: "RAISE", amountBb: 10 }];
   const evs = { fold: 0.9, shove: 1 };

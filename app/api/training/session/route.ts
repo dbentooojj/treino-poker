@@ -11,7 +11,7 @@ import {
   getTrainingReportSpot,
   type SessionStartRequest,
 } from "../../../../db/training";
-import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingType, type TrainingConfig } from "../../../../lib/training";
+import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingPresentationMode, isTrainingType, type TrainingConfig } from "../../../../lib/training";
 
 export const dynamic = "force-dynamic";
 
@@ -92,6 +92,7 @@ function parseStartRequest(value: unknown): SessionStartRequest | null {
   }
   const config = payload.config as Partial<TrainingConfig> | undefined;
   if (!config || (config.trainingType !== null && !isTrainingType(config.trainingType)) || !isEquityModel(config.equityModel) || !isQuestionCount(config.targetQuestions)) return null;
+  if (config.presentationMode !== undefined && !isTrainingPresentationMode(config.presentationMode)) return null;
   if (config.stackDepthBb !== undefined && (!Number.isFinite(config.stackDepthBb) || config.stackDepthBb <= 0)) return null;
   if (config.heroPosition !== undefined && !isTrainingPosition(config.heroPosition)) return null;
   return { mode: "START", config: {
@@ -100,6 +101,7 @@ function parseStartRequest(value: unknown): SessionStartRequest | null {
     stackDepthBb: config.stackDepthBb,
     heroPosition: config.heroPosition,
     targetQuestions: config.targetQuestions,
+    presentationMode: config.presentationMode ?? "DECISION",
   } };
 }
 

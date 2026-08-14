@@ -12,6 +12,7 @@
     "test": "npm run test:unit && npm run typecheck && npm run lint && npm run build",
     "test:unit": "tsx --test tests/hrc-import.test.ts tests/training.test.ts tests/training-ui.test.tsx tests/poker-tools.test.ts tests/progress.test.ts tests/server-config.test.ts tests/play-engine.test.ts tests/play-ui.test.tsx",
     "test:integration": "tsx --test tests/postgres.integration.test.ts",
+    "benchmark:hrc-memory": "node --expose-gc --import tsx scripts/benchmark-hrc-memory.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",

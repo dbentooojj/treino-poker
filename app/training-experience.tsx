@@ -30,6 +30,7 @@ import {
   type TrainingReport,
   type TrainingSession,
   type TrainingMode,
+  type TrainingPresentationMode,
   type NodeRange,
   type TrainingType,
 } from "../lib/training";
@@ -44,9 +45,10 @@ type PendingSpotFeedback = {
   report: TrainingReport | null;
 };
 
-export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, onClose, onStarted, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; onClose?: () => void; onStarted: (session: TrainingSession) => void; embedded?: boolean }) {
+export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, initialPresentationMode = "DECISION", onClose, onStarted, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; initialPresentationMode?: TrainingPresentationMode; onClose?: () => void; onStarted: (session: TrainingSession) => void; embedded?: boolean }) {
   const [filters, setFilters] = useState<TrainingFilters>(initialFilters ?? { trainingType: preferredType });
   const [targetQuestions, setTargetQuestions] = useState<TrainingConfig["targetQuestions"]>(initialTargetQuestions);
+  const [presentationMode] = useState<TrainingPresentationMode>(initialPresentationMode);
   const [options, setOptions] = useState(EMPTY_OPTIONS);
   const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -77,7 +79,7 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
     return () => controller.abort();
   }, [filterQuery]);
 
-  const config = buildConfig(filters, targetQuestions, options.hasMatches);
+  const config = buildConfig(filters, targetQuestions, options.hasMatches, false, presentationMode);
   const noStudies = !loading && options.trainingTypes.length === 0;
 
   async function start() {
@@ -140,6 +142,7 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
   const [starting, setStarting] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState("");
+  const [presentationMode, setPresentationMode] = useState<TrainingPresentationMode>("DECISION");
   const targetQuestions: TrainingConfig["targetQuestions"] = 50;
   const filterQuery = useMemo(() => {
     const params = new URLSearchParams();
@@ -170,7 +173,7 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
     return () => controller.abort();
   }, [filterQuery]);
 
-  const config = buildConfig(filters, targetQuestions, options.hasMatches, true);
+  const config = buildConfig(filters, targetQuestions, options.hasMatches, true, presentationMode);
   const modelLabel = options.tableContext
     ? `${gameTypeLabels[options.tableContext.gameType]} • ${equityModelLabels[options.tableContext.equityModel]}`
     : "Nenhum modelo disponível";
@@ -212,11 +215,20 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
         <span className="quick-label" id="preflop-action-label">Ação pré-flop <small title="Situação enfrentada pelo Hero" aria-label="Ajuda: situação enfrentada pelo Hero">?</small></span>
         <div role="group" aria-labelledby="preflop-action-label">{QUICK_PREFLOP_ACTIONS.map((item) => {
           const isAny = item.id === "ANY";
-          const available = isAny ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
-          const selected = isAny ? available && !filters.trainingType : item.type === filters.trainingType;
+          const isFromStart = item.id === "FROM_START";
+          const available = isAny || isFromStart ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
+          const selected = isFromStart ? presentationMode === "FROM_START" : presentationMode === "DECISION" && (isAny ? available && !filters.trainingType : item.type === filters.trainingType);
           return <button type="button" key={item.id} disabled={!available || loading} title={available ? undefined : item.type ? "Nenhum estudo publicado para esta categoria" : "Ainda não há suporte para este filtro"} className={selected ? "selected" : ""} onClick={() => {
-            if (isAny) setFilters((current) => ({ equityModel: current.equityModel }));
-            else if (item.type) setFilters((current) => ({ trainingType: item.type, equityModel: current.equityModel }));
+            if (isFromStart) {
+              setPresentationMode("FROM_START");
+              setFilters((current) => ({ equityModel: current.equityModel }));
+            } else if (isAny) {
+              setPresentationMode("DECISION");
+              setFilters((current) => ({ equityModel: current.equityModel }));
+            } else if (item.type) {
+              setPresentationMode("DECISION");
+              setFilters((current) => ({ trainingType: item.type, equityModel: current.equityModel }));
+            }
           }}>{item.label}</button>;
         })}</div>
       </div>
@@ -227,6 +239,7 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
     {advancedOpen && <TrainingSetup
       initialFilters={filters}
       initialTargetQuestions={targetQuestions}
+      initialPresentationMode={presentationMode}
       onClose={() => setAdvancedOpen(false)}
       onStarted={(session) => { setAdvancedOpen(false); onStarted(session); }}
     />}
@@ -248,6 +261,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
   const [retryContext, setRetryContext] = useState<PendingSpotFeedback | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [replayAttempt, setReplayAttempt] = useState(0);
   const [elapsed, setElapsed] = useState(() => Math.max(0, Math.round((Date.now() - session.startedAt) / 1000)));
 
   useEffect(() => {
@@ -301,6 +315,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     setRetryContext(feedback);
     setFeedback(null);
     setError("");
+    setReplayAttempt((current) => nextReplayAttempt(current, session.config.presentationMode));
   }
 
   function advanceSpot() {
@@ -356,6 +371,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     </aside>
     <div className="spot-session-main">
       <TrainingDecision
+        key={`${exercise.trainingHandId}:${session.config.presentationMode ?? "DECISION"}:${replayAttempt}`}
         exercise={exercise}
         busy={busy}
         feedback={feedback}
@@ -363,6 +379,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
         onChoose={choose}
         onRepeat={repeatSpot}
         onNext={advanceSpot}
+        replayFromStart={session.config.presentationMode === "FROM_START"}
       />
       {error && <StatusMessage className="trainer-error" tone="error">{error}</StatusMessage>}
     </div>
@@ -504,9 +521,13 @@ function normalizeFilters(current: TrainingFilters, options: TrainingOptions): T
   return { trainingType, equityModel, stackDepthBb, heroPosition };
 }
 
-function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["targetQuestions"], hasMatches: boolean, allowAny = false): TrainingConfig | null {
+function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["targetQuestions"], hasMatches: boolean, allowAny = false, presentationMode: TrainingPresentationMode = "DECISION"): TrainingConfig | null {
   if (!hasMatches || (!allowAny && !filters.trainingType) || !filters.equityModel) return null;
-  return { trainingType: filters.trainingType ?? null, equityModel: filters.equityModel, stackDepthBb: filters.stackDepthBb, heroPosition: filters.heroPosition, targetQuestions };
+  return { trainingType: filters.trainingType ?? null, equityModel: filters.equityModel, stackDepthBb: filters.stackDepthBb, heroPosition: filters.heroPosition, targetQuestions, presentationMode };
+}
+
+export function nextReplayAttempt(current: number, presentationMode: TrainingPresentationMode | undefined) {
+  return presentationMode === "FROM_START" ? current + 1 : current;
 }
 
 function SelectField({ id, label, value, options, disabled, onChange }: { id: string; label: string; value: string | number; options: Array<{ value: string | number; label: string }>; disabled: boolean; onChange: (value: string) => void }) {

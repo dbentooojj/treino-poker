@@ -133,6 +133,7 @@ export async function createTrainingSession(userId: string, request: SessionStar
       userId,
       trainingSetId: selectedSet?.id ?? null,
       trainingType: config.trainingType,
+      presentationMode: config.presentationMode ?? "DECISION",
       equityModel: config.equityModel,
       playersCount: selectedSet?.playersCount ?? null,
       stackBb: config.stackDepthBb ?? null,
@@ -570,6 +571,7 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
 function sessionConfig(session: typeof trainingSessions.$inferSelect): TrainingConfig {
   return {
     trainingType: session.trainingType,
+    presentationMode: session.presentationMode,
     equityModel: session.equityModel,
     stackDepthBb: session.stackBb ?? undefined,
     heroPosition: session.heroPosition ?? undefined,
@@ -579,6 +581,7 @@ function sessionConfig(session: typeof trainingSessions.$inferSelect): TrainingC
 
 function sameConfig(left: TrainingConfig, right: TrainingConfig) {
   return left.trainingType === right.trainingType
+    && (left.presentationMode ?? "DECISION") === (right.presentationMode ?? "DECISION")
     && left.equityModel === right.equityModel
     && (left.stackDepthBb ?? null) === (right.stackDepthBb ?? null)
     && (left.heroPosition ?? null) === (right.heroPosition ?? null)

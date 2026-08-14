@@ -1,4 +1,5 @@
-export const TRAINING_TYPES = ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN"] as const;
+export const TRAINING_TYPES = ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET", "VS_4_BET"] as const;
+export const TRAINING_PRESENTATION_MODES = ["DECISION", "FROM_START"] as const;
 export const EQUITY_MODELS = ["CHIP_EV", "ICM"] as const;
 export const EV_UNITS = ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"] as const;
 export const QUESTION_COUNTS = [20, 50, 100] as const;
@@ -6,6 +7,7 @@ export const MIN_STRATEGY_FREQUENCY_PERCENT = 5;
 export const MAX_EXERCISE_QUEUE_SIZE = 100;
 
 export type TrainingType = (typeof TRAINING_TYPES)[number];
+export type TrainingPresentationMode = (typeof TRAINING_PRESENTATION_MODES)[number];
 export type EquityModel = (typeof EQUITY_MODELS)[number];
 export type EvUnit = (typeof EV_UNITS)[number];
 export type TrainingActionType = "FOLD" | "CHECK" | "CALL" | "BET" | "RAISE";
@@ -36,6 +38,7 @@ export type TrainingConfig = Required<Pick<TrainingFilters, "equityModel">> & {
   stackDepthBb?: number;
   heroPosition?: string;
   targetQuestions: number | null;
+  presentationMode?: TrainingPresentationMode;
 };
 
 export type BlindStructure = {
@@ -181,9 +184,11 @@ export type TrainingReport = {
 
 export const trainingTypeLabels: Record<TrainingType, string> = {
   PUSH_FOLD: "Push/Fold",
-  CALL_VS_SHOVE: "Call vs Shove",
-  OPEN_FOLD: "Open/Fold",
+  CALL_VS_SHOVE: "Vs Shove",
+  OPEN_FOLD: "RFI",
   VS_OPEN: "Vs Open",
+  VS_3_BET: "Vs 3-bet",
+  VS_4_BET: "Vs 4-bet",
 };
 
 export const trainingTypeDescriptions: Record<TrainingType, string> = {
@@ -191,6 +196,8 @@ export const trainingTypeDescriptions: Record<TrainingType, string> = {
   CALL_VS_SHOVE: "Responder a um shove",
   OPEN_FOLD: "Abrir ou abandonar a mão",
   VS_OPEN: "Responder a um open raise",
+  VS_3_BET: "Defender o open contra uma 3-bet",
+  VS_4_BET: "Responder a uma 4-bet após aplicar a 3-bet",
 };
 
 export const equityModelLabels: Record<EquityModel, string> = { CHIP_EV: "ChipEV", ICM: "ICM" };
@@ -207,7 +214,30 @@ export function actionLabel(action: TrainingAction, node: Pick<TrainingExercise,
   if (typeof action.amountBb === "number" && action.amountBb >= node.heroStackBb - 0.01) return "All-in";
   if (node.trainingType === "OPEN_FOLD") return action.amountBb ? `Open ${formatBb(action.amountBb)} BB` : "Open raise";
   if (node.trainingType === "VS_OPEN") return action.amountBb ? `3-bet ${formatBb(action.amountBb)} BB` : "3-bet";
+  if (node.trainingType === "VS_3_BET") return action.amountBb ? `4-bet ${formatBb(action.amountBb)} BB` : "4-bet";
+  if (node.trainingType === "VS_4_BET") return action.amountBb ? `5-bet ${formatBb(action.amountBb)} BB` : "5-bet";
   return action.amountBb ? `Raise ${formatBb(action.amountBb)} BB` : "Raise";
+}
+
+export function buildSpotSignature(spot: {
+  trainingType: TrainingType;
+  heroPosition: string;
+  villainPosition: string | null;
+  heroStackBb: number;
+  actionSequence: TrainingSequenceAction[];
+  availableActions: TrainingAction[];
+}) {
+  const raises = spot.actionSequence.filter((action) => action.type === "RAISE");
+  const describeRaise = (action: TrainingSequenceAction | undefined, label: string) => {
+    if (!action) return label;
+    return `${action.position ?? "Vilão"} ${label}${typeof action.amountBb === "number" ? ` ${formatBb(action.amountBb)} BB` : ""}`;
+  };
+  if (spot.trainingType === "OPEN_FOLD") return `RFI • ${spot.heroPosition}`;
+  if (spot.trainingType === "PUSH_FOLD") return `Push/Fold • ${spot.heroPosition}`;
+  if (spot.trainingType === "CALL_VS_SHOVE") return `${spot.heroPosition} vs ${describeRaise(raises.at(-1), "shove")}`;
+  if (spot.trainingType === "VS_OPEN") return `${spot.heroPosition} vs ${describeRaise(raises[0], "open")}`;
+  if (spot.trainingType === "VS_3_BET") return `${describeRaise(raises[0], "open")} vs ${describeRaise(raises[1], "3-bet")} • Hero ${spot.heroPosition}`;
+  return `${describeRaise(raises[0], "open")} • ${describeRaise(raises[1], "3-bet")} vs ${describeRaise(raises[2], "4-bet")} • Hero ${spot.heroPosition}`;
 }
 
 export function resolvedActionLabel(value: TrainingAction | string, actions: TrainingAction[], node: Pick<TrainingExercise, "heroStackBb" | "trainingType">) {
@@ -220,6 +250,7 @@ export function resolvedActionLabel(value: TrainingAction | string, actions: Tra
 
 export function formatBb(value: number) { return Number(value.toFixed(2)).toString(); }
 export function isTrainingType(value: unknown): value is TrainingType { return typeof value === "string" && (TRAINING_TYPES as readonly string[]).includes(value); }
+export function isTrainingPresentationMode(value: unknown): value is TrainingPresentationMode { return typeof value === "string" && (TRAINING_PRESENTATION_MODES as readonly string[]).includes(value); }
 export function isEquityModel(value: unknown): value is EquityModel { return typeof value === "string" && (EQUITY_MODELS as readonly string[]).includes(value); }
 export function isQuestionCount(value: unknown): value is number | null { return value === null || (typeof value === "number" && (QUESTION_COUNTS as readonly number[]).includes(value)); }
 export function isTrainingPosition(value: unknown): value is string {

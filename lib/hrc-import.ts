@@ -3,7 +3,7 @@ import type { EvUnit, TrainingAction, TrainingSequenceAction, TrainingType } fro
 export type HrcAction = {
   type: "F" | "C" | "R" | "X";
   amount: number;
-  node?: number;
+  node?: number | string;
   metadata: Record<string, unknown>;
 };
 
@@ -16,6 +16,7 @@ export type HrcHand = {
 };
 export type HrcNode = {
   nodeKey: string;
+  sourceNodeId: string;
   sourcePath: string;
   player: number;
   street: number;
@@ -23,12 +24,33 @@ export type HrcNode = {
   sequence: HrcSequenceAction[];
   actions: HrcAction[];
   hands: Record<string, HrcHand>;
+  eligibleHandCount: number;
   metadata: Record<string, unknown>;
 };
 export type HrcSettings = {
-  handdata: { stacks: number[]; blinds: number[]; skipSb: boolean; movingBu: boolean; anteType: string };
+  handdata: {
+    stacks: number[];
+    blinds: number[];
+    skipSb: boolean;
+    movingBu: boolean;
+    anteType: string;
+    anteMode: string;
+    anteFirst: boolean;
+  };
   eqmodel: { id: string; raked: boolean; metadata: Record<string, unknown> };
   metadata: Record<string, unknown>;
+};
+
+type HrcPreflopContext = {
+  stacks: number[];
+  initialLiveContributions: number[];
+  deadContributions: number[];
+};
+
+type HrcPreflopState = {
+  active: boolean[];
+  liveContributions: number[];
+  remainingStacks: number[];
 };
 export type HrcValidatedPack = { name: string; settings: HrcSettings; nodes: HrcNode[]; eligible: number };
 export type HrcPack = HrcValidatedPack & { contentHash: string; archiveSizeBytes: number };
@@ -53,6 +75,22 @@ export type HrcStudyNode = {
   metadata: Record<string, unknown>;
 };
 
+export const HRC_IGNORED_REASONS = ["POSTFLOP", "AUTOMATIC_X", "UNSUPPORTED_SEQUENCE", "NO_ELIGIBLE_HANDS", "NON_TRAINABLE"] as const;
+export type HrcIgnoredReason = (typeof HRC_IGNORED_REASONS)[number];
+export type HrcIgnoredCounts = Record<HrcIgnoredReason, number>;
+
+export type HrcSourceTreeNode = {
+  sourceNodeId: string;
+  sourcePath: string;
+  player: number;
+  street: number;
+  sequence: HrcSequenceAction[];
+  actions: HrcAction[];
+  trainingNodeKey: string | null;
+  ignoredReason: HrcIgnoredReason | null;
+  metadata: Record<string, unknown>;
+};
+
 export type HrcStudyImport = {
   name: string;
   contentHash: string;
@@ -66,8 +104,9 @@ export type HrcStudyImport = {
   ante: number;
   anteType: "NONE" | "ANTE" | "BB_ANTE";
   icmContext: string | null;
-  ignoredNodes: { AUTOMATIC_X: number };
+  ignoredNodes: HrcIgnoredCounts;
   metadata: Record<string, unknown>;
+  sourceNodes: HrcSourceTreeNode[];
   nodes: HrcStudyNode[];
 };
 
@@ -79,17 +118,24 @@ export type HrcImportSummary = {
   smallBlindBb: number;
   anteBb: number;
   anteType: HrcStudyImport["anteType"];
+  sourceNodeCount: number;
+  preflopNodeCount: number;
   nodeCount: number;
-  handCount: number;
+  storedHandClassCount: number;
+  eligibleTrainingHandClassCount: number;
   counts: Record<TrainingType, number>;
-  ignoredNodes: HrcStudyImport["ignoredNodes"];
+  ignoredCount: number;
+  ignoredNodes: HrcIgnoredCounts;
 };
 
-const MAX_ARCHIVE_BYTES = 25 * 1024 * 1024;
-const MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024;
-const MAX_ENTRY_BYTES = 4 * 1024 * 1024;
-const MAX_ZIP_ENTRIES = 510;
-const MAX_NODE_COUNT = 500;
+export const HRC_IMPORT_LIMITS = {
+  archiveBytes: 128 * 1024 * 1024,
+  uncompressedBytes: 512 * 1024 * 1024,
+  entryBytes: 8 * 1024 * 1024,
+  zipEntries: 20_050,
+  nodeCount: 20_000,
+  compressionRatio: 200,
+} as const;
 const HAND_RANKS = [..."AKQJT98765432"];
 const CANONICAL_HAND_CLASSES = new Set(buildCanonicalHandClasses());
 const FREQUENCY_EPSILON = 1e-6;
@@ -133,107 +179,105 @@ export async function parseHrcPack(file: UploadedFile): Promise<HrcPack> {
   validateUpload(file);
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
-  const [files, contentHash] = await Promise.all([readHrcZip(bytes), sha256(bytes)]);
-  const settingsEntry = [...files.keys()].find((name) => name.endsWith("settings.json"));
-  if (!settingsEntry) throw new HrcImportError("settings.json não encontrado. Use Export Strategies → Complete Export no HRC.");
-  const root = settingsEntry.slice(0, -"settings.json".length);
-  const nodeEntries = [...files.keys()].filter((name) => name.startsWith(`${root}nodes/`) && name.endsWith(".json"));
-  if (!nodeEntries.length) throw new HrcImportError("Nenhuma estratégia foi encontrada neste ZIP.");
-  nodeEntries.sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
+  const [archive, contentHash] = await Promise.all([readHrcZipIndex(bytes), sha256(bytes)]);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const rawSettings = parseJson(decoder.decode(await inflateEntry(bytes, archive.view, archive.settings)), archive.settings.name);
+  const settings = parseSettings(rawSettings);
+  const preflopContext = createPreflopContext(settings);
+  const nodes: HrcNode[] = [];
+  const sourceIds = new Set<string>();
+  let eligible = 0;
+  for (let index = 0; index < archive.nodes.length; index++) {
+    const entry = archive.nodes[index];
+    const rawNode = parseJson(decoder.decode(await inflateEntry(bytes, archive.view, entry)), entry.name);
+    const node = parseNode(rawNode, index, settings.handdata.stacks.length, entry.name);
+    if (sourceIds.has(node.sourceNodeId)) throw new HrcImportError(`Identificador de source node duplicado: ${node.sourceNodeId}.`);
+    sourceIds.add(node.sourceNodeId);
+    eligible += node.eligibleHandCount;
+    if (node.street !== 0 || !classifyHrcNodeDetailed(node, preflopContext).trainingType || node.eligibleHandCount === 0) node.hands = {};
+    nodes.push(node);
+  }
+  if (!eligible) throw new HrcImportError("Nenhuma mão elegível foi encontrada neste estudo.");
+  const name = file.name.replace(/\.zip$/i, "").trim().slice(0, 160);
+  if (!name) throw new HrcImportError("Nome do pacote HRC inválido.");
+  return {
+    name,
+    settings,
+    nodes,
+    eligible,
+    contentHash,
+    archiveSizeBytes: file.size,
+  };
+}
 
-  const settings = parseJson(files.get(settingsEntry)!, settingsEntry);
-  const nodes = nodeEntries.map((name) => parseJson(files.get(name)!, name));
-  const validated = validateHrcPack({ name: file.name.replace(/\.zip$/i, ""), settings, nodes }, nodeEntries);
-  return { ...validated, contentHash, archiveSizeBytes: file.size };
+export function normalizeHrcNodeReference(value: number | string): string | null {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const basename = trimmed.replaceAll("\\", "/").split("/").filter(Boolean).at(-1);
+  const normalized = basename?.replace(/\.json$/i, "").trim() ?? "";
+  return normalized || null;
 }
 
 export function validateHrcPack(value: unknown, nodePaths: string[] = []): HrcValidatedPack {
   if (!isRecord(value)) throw new HrcImportError("Pacote HRC inválido.");
   const name = typeof value.name === "string" ? value.name.trim().slice(0, 160) : "";
-  const settings = value.settings;
   const nodes = value.nodes;
-  if (!name || !isRecord(settings) || !isRecord(settings.handdata) || !isRecord(settings.eqmodel) || !Array.isArray(nodes)) {
+  if (!name || !Array.isArray(nodes)) {
     throw new HrcImportError("Pacote HRC inválido.");
   }
-  if (nodes.length === 0 || nodes.length > MAX_NODE_COUNT) throw new HrcImportError("Quantidade de nodes do pacote HRC inválida.");
-
-  const stacks = strictNumberArray(settings.handdata.stacks, "stacks");
-  const blinds = strictNumberArray(settings.handdata.blinds, "blinds");
-  if (stacks.length < 2 || stacks.length > 10 || stacks.some((stack) => stack <= 0)) {
-    throw new HrcImportError("Stacks inválidos no settings.json.");
+  if (nodes.length === 0 || nodes.length > HRC_IMPORT_LIMITS.nodeCount) throw new HrcImportError("Quantidade de nodes do pacote HRC inválida.");
+  const settings = parseSettings(value.settings);
+  const parsedNodes = nodes.map((node, index) => parseNode(node, index, settings.handdata.stacks.length, nodePaths[index] ?? `nodes/${index}.json`));
+  const sourceIds = new Set<string>();
+  for (const node of parsedNodes) {
+    if (sourceIds.has(node.sourceNodeId)) throw new HrcImportError(`Identificador de source node duplicado: ${node.sourceNodeId}.`);
+    sourceIds.add(node.sourceNodeId);
   }
-  if (blinds.length < 2 || blinds[0] <= 0 || blinds[1] < 0 || blinds[1] > blinds[0] || (blinds[2] ?? 0) < 0) {
-    throw new HrcImportError("Blinds inválidos no settings.json.");
-  }
-
-  const parsedNodes = nodes.map((node, index) => parseNode(node, index, stacks.length, nodePaths[index] ?? `nodes/${index}.json`));
   const eligible = parsedNodes.reduce(
-    (total, node) => total + Object.values(node.hands).filter((hand) => hand.weight >= 0.01).length,
+    (total, node) => total + node.eligibleHandCount,
     0,
   );
   if (!eligible) throw new HrcImportError("Nenhuma mão elegível foi encontrada neste estudo.");
-
-  const eqmodelId = firstString(settings.eqmodel.id, settings.eqmodel.type, settings.eqmodel.name, settings.eqmodel.model);
-  return {
-    name,
-    settings: {
-      handdata: {
-        stacks,
-        blinds,
-        skipSb: Boolean(settings.handdata.skipSb),
-        movingBu: Boolean(settings.handdata.movingBu),
-        anteType: firstString(settings.handdata.anteType, settings.handdata.anteMode),
-      },
-      eqmodel: {
-        id: eqmodelId,
-        raked: Boolean(settings.eqmodel.raked),
-        metadata: withoutKeys(settings.eqmodel, ["id", "raked"]),
-      },
-      metadata: structuredClone(settings),
-    },
-    nodes: parsedNodes,
-    eligible,
-  };
+  return { name, settings, nodes: parsedNodes, eligible };
 }
 
-export function toHrcStudyImport(pack: HrcPack): HrcStudyImport {
+export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boolean } = {}): HrcStudyImport {
   if (!/^[a-f0-9]{64}$/.test(pack.contentHash)) throw new HrcImportError("Hash do arquivo HRC inválido.");
-  const { stacks, blinds, anteType: rawAnteType } = pack.settings.handdata;
+  const { stacks, blinds, anteType: rawAnteType, anteMode } = pack.settings.handdata;
   const bigBlind = blinds[0];
   const positions = positionNames(stacks.length);
   const ante = Math.max(0, blinds[2] ?? 0);
-  const anteType = normalizeAnteType(rawAnteType, ante);
+  const anteType = normalizeAnteType(`${rawAnteType} ${anteMode}`, ante);
+  const preflopContext = createPreflopContext(pack.settings);
   const equityModel = inferEquityModel(pack.settings.eqmodel);
   const stackValues = stacks.map((stack) => roundBb(stack / bigBlind));
   const stackBb = stackValues.every((stack) => Math.abs(stack - stackValues[0]) < 0.001) ? stackValues[0] : null;
-  const ignoredNodes = {
-    AUTOMATIC_X: pack.nodes.filter(isAutomaticXNode).length,
-  };
+  const ignoredNodes = emptyIgnoredCounts();
+  const counts = emptyTrainingTypeCounts();
+  const nodes: HrcStudyNode[] = [];
+  const sourceNodes: HrcSourceTreeNode[] = [];
+  const nodeKeys = new Set<string>();
+  let preflopNodeCount = 0;
+  let storedHandClassCount = 0;
+  let eligibleTrainingHandClassCount = 0;
 
-  const nodes = pack.nodes.flatMap((node): HrcStudyNode[] => {
-    if (node.street !== 0 || !node.actions.length || node.player < 0) return [];
-    const trainingType = classifyHrcNode(node, stacks);
-    if (!trainingType) return [];
-    const hands = Object.entries(node.hands);
-    if (!hands.some(([, hand]) => hand.weight >= 0.01)) return [];
+  for (const node of pack.nodes) {
+    if (node.street === 0) preflopNodeCount++;
+    const classification = classifyHrcNodeDetailed(node, preflopContext);
+    if (classification.reason) ignoredNodes[classification.reason]++;
+    const trainingType = classification.trainingType;
+    const rawHands = trainingType ? Object.entries(node.hands) : [];
+    let trainingNode: HrcStudyNode | null = null;
 
-    const availableActions = node.actions.map((action, actionIndex) => toTrainingAction(action, actionIndex, node, stacks, bigBlind));
-    const lastRaise = [...node.sequence].reverse().find((action) => action.type === "R");
-    const heroPosition = positions[node.player] ?? `P${node.player + 1}`;
-    const villainPosition = lastRaise ? positions[lastRaise.player] ?? `P${lastRaise.player + 1}` : null;
-
-    return [{
-      nodeKey: node.nodeKey,
-      trainingType,
-      heroPosition,
-      heroStackBb: roundBb(stacks[node.player] / bigBlind),
-      villainPosition,
-      actionSequence: node.sequence.map((action, actionIndex) => ({
-        ...toTrainingAction(action, actionIndex, node, stacks, bigBlind, action.player),
-        position: positions[action.player] ?? `P${action.player + 1}`,
-      })),
-      availableActions,
-      hands: hands.map(([handClass, hand]) => {
+    if (trainingType && node.eligibleHandCount > 0 && rawHands.length) {
+      if (nodeKeys.has(node.nodeKey)) throw new HrcImportError(`Identificador de node duplicado no estudo: ${node.nodeKey}.`);
+      nodeKeys.add(node.nodeKey);
+      const availableActions = node.actions.map((action, actionIndex) => toTrainingAction(action, actionIndex, node, preflopContext, bigBlind, positions, trainingType));
+      const lastRaise = node.sequence.findLast((action) => action.type === "R");
+      const heroPosition = positions[node.player] ?? `P${node.player + 1}`;
+      const villainPosition = lastRaise ? positions[lastRaise.player] ?? `P${lastRaise.player + 1}` : null;
+      const trainingHands = rawHands.map(([handClass, hand]) => {
         const strategy = Object.fromEntries(availableActions.map((action, index) => [action.id!, hand.played[index]]));
         const evs = Object.fromEntries(availableActions.map((action, index) => [action.id!, hand.evs[index]]));
         const actionEvs = hand.evs.slice(0, availableActions.length);
@@ -248,22 +292,55 @@ export function toHrcStudyImport(pack: HrcPack): HrcStudyImport {
           isMixed: hand.played.slice(0, availableActions.length).filter((frequency) => frequency >= 0.05).length > 1,
           metadata: { ...hand.metadata, hrcWeight: hand.weight },
         };
-      }),
+      });
+      trainingNode = {
+        nodeKey: node.nodeKey,
+        trainingType,
+        heroPosition,
+        heroStackBb: roundBb(stacks[node.player] / bigBlind),
+        villainPosition,
+        actionSequence: node.sequence.map((action, actionIndex) => ({
+          ...toTrainingAction(action, actionIndex, node, preflopContext, bigBlind, positions, trainingType, action.player, true),
+          position: positions[action.player] ?? `P${action.player + 1}`,
+        })),
+        availableActions,
+        hands: trainingHands,
+        metadata: {
+          ...node.metadata,
+          hrcNodeSource: node.sourcePath,
+          hrcPlayer: node.player,
+          hrcChildren: node.children,
+        },
+      };
+      nodes.push(trainingNode);
+      counts[trainingType]++;
+      storedHandClassCount += trainingHands.length;
+      eligibleTrainingHandClassCount += trainingHands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length;
+    }
+
+    sourceNodes.push({
+      sourceNodeId: node.sourceNodeId,
+      sourcePath: node.sourcePath,
+      player: node.player,
+      street: node.street,
+      sequence: node.sequence,
+      actions: node.actions,
+      trainingNodeKey: trainingNode?.nodeKey ?? null,
+      ignoredReason: classification.reason,
       metadata: {
         ...node.metadata,
-        hrcNodeSource: node.sourcePath,
-        hrcPlayer: node.player,
         hrcChildren: node.children,
+        eligibleHandCount: node.eligibleHandCount,
       },
-    }];
-  });
+    });
 
-  if (!nodes.length) throw new HrcImportError("O estudo não contém nodes pré-flop que possam ser classificados com segurança para treinamento.");
-  const nodeKeys = new Set<string>();
-  for (const node of nodes) {
-    if (nodeKeys.has(node.nodeKey)) throw new HrcImportError(`Identificador de node duplicado no estudo: ${node.nodeKey}.`);
-    nodeKeys.add(node.nodeKey);
+    if (options.releaseRawHands) {
+      // A forma persistível já contém estratégia e EV; no fluxo de importação não
+      // mantenha também a cópia bruta mais pesada enquanto converte os próximos nodes.
+      node.hands = {};
+    }
   }
+
   return {
     name: pack.name,
     contentHash: pack.contentHash,
@@ -279,23 +356,28 @@ export function toHrcStudyImport(pack: HrcPack): HrcStudyImport {
     icmContext: equityModel === "ICM" ? pack.settings.eqmodel.id || "ICM" : null,
     ignoredNodes,
     metadata: {
-      validationVersion: 2,
+      validationVersion: 3,
+      importerVersion: "HRC_COMPLETE_TREE_V3",
       sourceFormat: "HRC_COMPLETE_EXPORT",
       hrcEquityModel: pack.settings.eqmodel.id,
       hrcRaked: pack.settings.eqmodel.raked,
       hrcNodeCount: pack.nodes.length,
       compatibleNodeCount: nodes.length,
+      preflopNodeCount,
       ignoredNodes,
-      eligibleHands: nodes.reduce((total, node) => total + node.hands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length, 0),
+      counts,
+      storedHandClasses: storedHandClassCount,
+      eligibleHands: eligibleTrainingHandClassCount,
       archiveSizeBytes: pack.archiveSizeBytes,
       hrcSettings: pack.settings.metadata,
     },
+    sourceNodes,
     nodes,
   };
 }
 
 export function summarizeHrcStudy(study: HrcStudyImport): HrcImportSummary {
-  const counts: Record<TrainingType, number> = { PUSH_FOLD: 0, CALL_VS_SHOVE: 0, OPEN_FOLD: 0, VS_OPEN: 0 };
+  const counts = emptyTrainingTypeCounts();
   for (const node of study.nodes) counts[node.trainingType]++;
   return {
     name: study.name,
@@ -305,46 +387,73 @@ export function summarizeHrcStudy(study: HrcStudyImport): HrcImportSummary {
     smallBlindBb: roundBb(study.smallBlind / study.bigBlind),
     anteBb: roundBb(study.ante / study.bigBlind),
     anteType: study.anteType,
+    sourceNodeCount: study.sourceNodes.length,
+    preflopNodeCount: study.sourceNodes.filter((node) => node.street === 0).length,
     nodeCount: study.nodes.length,
-    handCount: study.nodes.reduce((total, node) => total + node.hands.length, 0),
+    storedHandClassCount: study.nodes.reduce((total, node) => total + node.hands.length, 0),
+    eligibleTrainingHandClassCount: study.nodes.reduce((total, node) => total + node.hands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length, 0),
     counts,
+    ignoredCount: Object.values(study.ignoredNodes).reduce((total, count) => total + count, 0),
     ignoredNodes: study.ignoredNodes,
   };
 }
 
-export function classifyHrcNode(node: HrcNode, stacks: number[]): TrainingType | null {
-  if (node.player < 0 || !node.actions.length || node.actions.some((action) => action.type === "X")) return null;
-  const foldActions = node.actions.filter((action) => action.type === "F");
-  const callActions = node.actions.filter((action) => action.type === "C");
-  const raiseActions = node.actions.filter((action) => action.type === "R");
-  if (foldActions.length !== 1) return null;
+export function classifyHrcNode(node: HrcNode, settingsOrStacks: HrcSettings | number[]): TrainingType | null {
+  const context = Array.isArray(settingsOrStacks)
+    ? createBarePreflopContext(settingsOrStacks)
+    : createPreflopContext(settingsOrStacks);
+  return classifyHrcNodeDetailed(node, context).trainingType;
+}
 
-  const voluntary = node.sequence.filter((action) => action.type === "R" || (action.type === "C" && action.amount > 0));
+function classifyHrcNodeDetailed(node: HrcNode, context: HrcPreflopContext): { trainingType: TrainingType | null; reason: HrcIgnoredReason | null } {
+  if (node.street !== 0) return { trainingType: null, reason: "POSTFLOP" };
+  if (isAutomaticXNode(node)) return { trainingType: null, reason: "AUTOMATIC_X" };
+  if (node.player < 0 || node.actions.length < 2 || node.actions.some((action) => action.type === "X")) {
+    return { trainingType: null, reason: "NON_TRAINABLE" };
+  }
+  if (node.eligibleHandCount === 0) return { trainingType: null, reason: "NO_ELIGIBLE_HANDS" };
+  const raiseActions = node.actions.filter((action) => action.type === "R");
+  const voluntary = node.sequence.filter(isVoluntaryAction);
   const priorRaises = node.sequence.filter((action) => action.type === "R");
-  if (!voluntary.length) {
-    if (callActions.length || !raiseActions.length) return null;
-    const shoveFlags = raiseActions.map((action) => isAllInRaise(action, node.player, stacks));
-    if (shoveFlags.every(Boolean)) return "PUSH_FOLD";
-    if (shoveFlags.every((flag) => !flag)) return "OPEN_FOLD";
-    return null;
+  if (!priorRaises.length && !voluntary.length) {
+    if (!raiseActions.length) return { trainingType: null, reason: "NON_TRAINABLE" };
+    const shoveFlags = raiseActions.map((action) => isAllInRaise(action, node.player, context, node.sequence));
+    if (shoveFlags.some((flag) => !flag)) return { trainingType: "OPEN_FOLD", reason: null };
+    return { trainingType: "PUSH_FOLD", reason: null };
   }
 
   const lastRaiseIndex = node.sequence.findLastIndex((action) => action.type === "R");
-  if (lastRaiseIndex < 0) return null;
+  if (lastRaiseIndex < 0) return { trainingType: null, reason: "UNSUPPORTED_SEQUENCE" };
   const lastRaise = node.sequence[lastRaiseIndex];
   const hasNonFoldAfterRaise = node.sequence.slice(lastRaiseIndex + 1).some((action) => action.type !== "F");
-  if (hasNonFoldAfterRaise) return null;
+  if (hasNonFoldAfterRaise || lastRaise.player === node.player) return { trainingType: null, reason: "UNSUPPORTED_SEQUENCE" };
 
-  if (isAllInRaise(lastRaise, lastRaise.player, stacks)) {
-    return callActions.length === 1 && !raiseActions.length ? "CALL_VS_SHOVE" : null;
+  if (isAllInRaise(lastRaise, lastRaise.player, context, node.sequence.slice(0, lastRaiseIndex))) {
+    return { trainingType: "CALL_VS_SHOVE", reason: null };
   }
-
-  const callsBeforeOpen = node.sequence.slice(0, lastRaiseIndex).some((action) => action.type === "C" && action.amount > 0);
-  if (priorRaises.length === 1 && !callsBeforeOpen && callActions.length === 1 && raiseActions.length > 0) return "VS_OPEN";
-  return null;
+  const heroVoluntary = voluntary.filter((action) => action.player === node.player);
+  const firstRaiseIndex = node.sequence.findIndex((action) => action.type === "R");
+  const voluntaryBeforeFirstRaise = firstRaiseIndex > 0 && node.sequence.slice(0, firstRaiseIndex).some(isVoluntaryAction);
+  if (priorRaises.length === 1 && heroVoluntary.length === 0 && !voluntaryBeforeFirstRaise) return { trainingType: "VS_OPEN", reason: null };
+  if (priorRaises.length === 2
+    && priorRaises[0].player === node.player
+    && priorRaises[1].player !== node.player
+    && heroVoluntary.length === 1
+    && heroVoluntary[0] === priorRaises[0]) {
+    return { trainingType: "VS_3_BET", reason: null };
+  }
+  if (priorRaises.length === 3
+    && priorRaises[0].player !== node.player
+    && priorRaises[1].player === node.player
+    && priorRaises[2].player !== node.player
+    && heroVoluntary.length === 1
+    && heroVoluntary[0] === priorRaises[1]) {
+    return { trainingType: "VS_4_BET", reason: null };
+  }
+  return { trainingType: null, reason: "UNSUPPORTED_SEQUENCE" };
 }
 
-async function readHrcZip(bytes: Uint8Array): Promise<Map<string, string>> {
+async function readHrcZipIndex(bytes: Uint8Array) {
   if (bytes.length < 22) throw new HrcImportError("ZIP do HRC inválido.");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const u16 = (offset: number) => view.getUint16(offset, true);
@@ -358,7 +467,7 @@ async function readHrcZip(bytes: Uint8Array): Promise<Map<string, string>> {
   const count = u16(eocd + 10);
   const centralSize = u32(eocd + 12);
   const centralOffset = u32(eocd + 16);
-  if (!count || count > MAX_ZIP_ENTRIES || centralOffset + centralSize > eocd) throw new HrcImportError("Índice do ZIP inválido.");
+  if (!count || count > HRC_IMPORT_LIMITS.zipEntries || centralOffset + centralSize > eocd) throw new HrcImportError("Índice do ZIP inválido.");
 
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const entries: ZipEntry[] = [];
@@ -387,11 +496,11 @@ async function readHrcZip(bytes: Uint8Array): Promise<Map<string, string>> {
     if ((flags & 1) !== 0) throw new HrcImportError("ZIPs protegidos por senha não são suportados.");
     if (![0, 8].includes(method)) throw new HrcImportError(`Compressão ZIP não suportada (${method}).`);
     if (!name.endsWith("/")) {
-      if (uncompressedSize > MAX_ENTRY_BYTES) throw new HrcImportError(`Arquivo interno muito grande: ${name}.`);
-      if (compressedSize > 0 && uncompressedSize / compressedSize > 200) throw new HrcImportError(`Taxa de compressão insegura no arquivo ${name}.`);
+      if (uncompressedSize > HRC_IMPORT_LIMITS.entryBytes) throw new HrcImportError(`Arquivo interno muito grande: ${name}.`);
+      if (compressedSize > 0 && uncompressedSize / compressedSize > HRC_IMPORT_LIMITS.compressionRatio) throw new HrcImportError(`Taxa de compressão insegura no arquivo ${name}.`);
       totalUncompressed += uncompressedSize;
     }
-    if (totalUncompressed > MAX_UNCOMPRESSED_BYTES) throw new HrcImportError("O conteúdo descompactado excede o limite de 64 MB.");
+    if (totalUncompressed > HRC_IMPORT_LIMITS.uncompressedBytes) throw new HrcImportError("O conteúdo descompactado excede o limite de 512 MB.");
     entries.push({ name, flags, method, crc, compressedSize, uncompressedSize, localOffset });
     pointer = end;
   }
@@ -401,12 +510,12 @@ async function readHrcZip(bytes: Uint8Array): Promise<Map<string, string>> {
   const root = settings[0].name.slice(0, -"settings.json".length);
   const expectedNode = new RegExp(`^${escapeRegExp(root)}nodes/[^/]+\\.json$`);
   const relevant = entries.filter((entry) => entry.name === settings[0].name || expectedNode.test(entry.name));
-  const unexpectedJson = entries.find((entry) => entry.name.endsWith(".json") && !relevant.includes(entry));
-  if (unexpectedJson) throw new HrcImportError(`JSON inesperado no ZIP: ${unexpectedJson.name}.`);
-
-  const files = new Map<string, string>();
-  for (const entry of relevant) files.set(entry.name, decoder.decode(await inflateEntry(bytes, view, entry)));
-  return files;
+  const unexpectedFile = entries.find((entry) => !entry.name.endsWith("/") && !relevant.includes(entry));
+  if (unexpectedFile) throw new HrcImportError(`Arquivo inesperado no ZIP: ${unexpectedFile.name}.`);
+  const nodes = relevant.filter((entry) => entry !== settings[0]).sort((left, right) => left.name.localeCompare(right.name, "en", { numeric: true }));
+  if (!nodes.length) throw new HrcImportError("Nenhuma estratégia foi encontrada neste ZIP.");
+  if (nodes.length > HRC_IMPORT_LIMITS.nodeCount) throw new HrcImportError("Quantidade de nodes do pacote HRC inválida.");
+  return { view, settings: settings[0], nodes };
 }
 
 async function inflateEntry(bytes: Uint8Array, view: DataView, entry: ZipEntry) {
@@ -421,7 +530,7 @@ async function inflateEntry(bytes: Uint8Array, view: DataView, entry: ZipEntry) 
   const start = entry.localOffset + 30 + localNameLength + localExtraLength;
   const end = start + entry.compressedSize;
   if (end > bytes.length) throw new HrcImportError(`Entrada ZIP incompleta: ${entry.name}.`);
-  const compressed = bytes.slice(start, end);
+  const compressed = bytes.subarray(start, end) as Uint8Array<ArrayBuffer>;
   let output: Uint8Array;
   if (entry.method === 0) output = compressed;
   else {
@@ -434,7 +543,7 @@ async function inflateEntry(bytes: Uint8Array, view: DataView, entry: ZipEntry) 
         const { done, value } = await reader.read();
         if (done) break;
         actualSize += value.byteLength;
-        if (actualSize > entry.uncompressedSize || actualSize > MAX_ENTRY_BYTES) {
+        if (actualSize > entry.uncompressedSize || actualSize > HRC_IMPORT_LIMITS.entryBytes) {
           await reader.cancel();
           throw new HrcImportError(`Tamanho descompactado inconsistente em ${entry.name}.`);
         }
@@ -454,10 +563,9 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
   if (!isRecord(value) || !Number.isInteger(value.player) || Number(value.player) < -1 || Number(value.player) >= playersCount) {
     throw new HrcImportError(`Node HRC ${sourcePath || index} inválido.`);
   }
-  if (!Array.isArray(value.actions) || !Array.isArray(value.sequence) || !isRecord(value.hands)) {
+  if (!Array.isArray(value.actions) || !Array.isArray(value.sequence)) {
     throw new HrcImportError(`Estrutura do node HRC ${sourcePath || index} inválida.`);
   }
-  const rawHands = value.hands;
   const actions = value.actions.map((action) => parseAction(action));
   const sequence = value.sequence.map((action) => {
     const parsed = parseAction(action);
@@ -465,6 +573,7 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
       throw new HrcImportError(`Sequência do node HRC ${sourcePath || index} inválida.`);
     }
     const street = optionalJsonNumber(action.street, 0, "street da sequência");
+    if (!Number.isInteger(street) || street < 0) throw new HrcImportError(`Sequência do node HRC ${sourcePath || index} inválida.`);
     return { ...parsed, player: Number(action.player), street };
   });
   if (actions.length > 20 || (actions.length > 0 && Number(value.player) < 0)) {
@@ -472,14 +581,38 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
   }
   const street = optionalJsonNumber(value.street, 0, "street do node");
   const children = optionalJsonNumber(value.children, 0, "children do node");
-  const hands: Record<string, HrcHand> = {};
-  const rawHandClasses = Object.keys(rawHands);
+  if (!Number.isInteger(street) || street < 0 || !Number.isInteger(children) || children < 0) {
+    throw new HrcImportError(`Estrutura do node HRC ${sourcePath || index} inválida.`);
+  }
+  const hands = street === 0 ? parsePreflopHands(value.hands, actions, children, sourcePath || String(index)) : {};
+  const explicitKey = firstIdentifier(value.id, value.nodeId, value.key);
+  const sourceNodeId = (explicitKey || sourcePath.split("/").at(-1)?.replace(/\.json$/i, "") || String(index)).slice(0, 240);
+  return {
+    nodeKey: sourceNodeId,
+    sourceNodeId,
+    sourcePath,
+    player: Number(value.player),
+    street,
+    children,
+    sequence,
+    actions,
+    hands,
+    eligibleHandCount: Object.values(hands).filter((hand) => hand.weight >= 0.01).length,
+    metadata: withoutKeys(value, ["id", "nodeId", "key", "player", "street", "children", "sequence", "actions", "hands"]),
+  };
+}
+
+function parsePreflopHands(rawValue: unknown, actions: HrcAction[], children: number, sourcePath: string): Record<string, HrcHand> {
+  if (!isRecord(rawValue)) throw new HrcImportError(`Estrutura do node HRC ${sourcePath} inválida.`);
+  const rawHandClasses = Object.keys(rawValue);
   const invalidHandClass = rawHandClasses.find((handClass) => !isHandClass(handClass));
   if (invalidHandClass) throw new HrcImportError(`Classe de mão não canônica ${invalidHandClass} no node ${sourcePath}.`);
-  if (actions.length && (rawHandClasses.length !== CANONICAL_HAND_CLASSES.size || [...CANONICAL_HAND_CLASSES].some((handClass) => !(handClass in rawHands)))) {
+  if (actions.length && (rawHandClasses.length !== CANONICAL_HAND_CLASSES.size || [...CANONICAL_HAND_CLASSES].some((handClass) => !(handClass in rawValue)))) {
     throw new HrcImportError(`Node ${sourcePath} deve conter exatamente as 169 classes de mãos canônicas.`);
   }
-  for (const [handClass, hand] of Object.entries(rawHands)) {
+
+  const hands: Record<string, HrcHand> = {};
+  for (const [handClass, hand] of Object.entries(rawValue)) {
     if (!isRecord(hand)) throw new HrcImportError(`Mão ${handClass} inválida no node ${sourcePath}.`);
     const played = normalizeFrequencies(strictNumberArray(hand.played, `frequências de ${handClass}`), actions.length, handClass, sourcePath);
     const evs = strictNumberArray(hand.evs, `EVs de ${handClass}`);
@@ -495,31 +628,25 @@ function parseNode(value: unknown, index: number, playersCount: number, sourcePa
       && actions[0].type === "X"
       && actions[0].amount === 0
       && children === 1
-      && Object.keys(rawHands).length === 169
-      && Object.keys(hands).length === 169
+      && rawHandClasses.length === CANONICAL_HAND_CLASSES.size
+      && Object.keys(hands).length === CANONICAL_HAND_CLASSES.size
       && Object.values(hands).every((hand) => hand.played.length === 1
         && Math.abs(hand.played[0] - 1) <= 0.000001
         && hand.evs.length === 1);
     if (!isValidAutomaticX) {
-      throw new HrcImportError(`Node automático X ${sourcePath || index} não segue o formato estrutural esperado.`);
+      throw new HrcImportError(`Node automático X ${sourcePath} não segue o formato estrutural esperado.`);
     }
   }
-  const explicitKey = firstString(value.id, value.nodeId, value.key);
-  return {
-    nodeKey: (explicitKey || sourcePath).slice(0, 240),
-    sourcePath,
-    player: Number(value.player),
-    street,
-    children,
-    sequence,
-    actions,
-    hands,
-    metadata: withoutKeys(value, ["id", "nodeId", "key", "player", "street", "children", "sequence", "actions", "hands"]),
-  };
+  return hands;
 }
 
 function parseAction(value: unknown): HrcAction {
   if (!isRecord(value) || !["F", "C", "R", "X"].includes(String(value.type))) throw new HrcImportError("Ação HRC inválida.");
+  const validNumericChild = typeof value.node === "number" && Number.isSafeInteger(value.node) && value.node >= 0;
+  const validStringChild = typeof value.node === "string" && value.node.length <= 240 && normalizeHrcNodeReference(value.node) !== null;
+  if (value.node !== undefined && !validNumericChild && !validStringChild) {
+    throw new HrcImportError("Referência de child node HRC inválida.");
+  }
   const amount = optionalJsonNumber(value.amount, 0, "valor da ação");
   if (amount < 0 || (value.type === "R" && amount <= 0) || (value.type === "X" && amount !== 0)) {
     throw new HrcImportError("Valor de ação HRC inválido.");
@@ -527,22 +654,39 @@ function parseAction(value: unknown): HrcAction {
   return {
     type: value.type as HrcAction["type"],
     amount,
-    ...(Number.isInteger(value.node) ? { node: Number(value.node) } : {}),
+    ...((validNumericChild || validStringChild) ? { node: value.node as number | string } : {}),
     metadata: withoutKeys(value, ["type", "amount", "node", "player", "street"]),
   };
 }
 
-function toTrainingAction(action: HrcAction, index: number, node: HrcNode, stacks: number[], bigBlind: number, actingPlayer = node.player): TrainingAction {
+function toTrainingAction(
+  action: HrcAction,
+  index: number,
+  node: HrcNode,
+  context: HrcPreflopContext,
+  bigBlind: number,
+  positions: string[],
+  _trainingType: TrainingType,
+  actingPlayer = node.player,
+  sequenceAction = false,
+): TrainingAction {
   const id = `action-${index}`;
   const metadata = { ...action.metadata, hrcType: action.type, hrcAmount: action.amount, ...(action.node === undefined ? {} : { hrcChildNode: action.node }) };
   if (action.type === "F") return { id, type: "FOLD", metadata };
-  if (action.type === "C") return { id, type: action.amount <= 0 ? "CHECK" : "CALL", metadata };
+  if (action.type === "C") {
+    if (action.amount <= 0) return { id, type: "CHECK", metadata };
+    const priorSequence = sequenceAction ? node.sequence.slice(0, index) : node.sequence;
+    const unopened = !priorSequence.some((prior) => prior.type === "R");
+    const label = unopened ? (positions[actingPlayer] === "SB" ? "Complete" : "Limp") : undefined;
+    return { id, type: "CALL", ...(label ? { label } : {}), metadata };
+  }
   if (action.type !== "R") throw new HrcImportError("Node automático X não pode ser convertido em uma decisão de treinamento.");
+  const priorSequence = sequenceAction ? node.sequence.slice(0, index) : node.sequence;
   return {
     id,
     type: "RAISE",
     amountBb: roundBb(action.amount / bigBlind),
-    label: isAllInRaise(action, actingPlayer, stacks) ? "All-in" : undefined,
+    label: isAllInRaise(action, actingPlayer, context, priorSequence) ? "All-in" : undefined,
     metadata,
   };
 }
@@ -551,10 +695,30 @@ function isAutomaticXNode(node: HrcNode) {
   return node.actions.length === 1 && node.actions[0].type === "X";
 }
 
-function isAllInRaise(action: Pick<HrcAction, "type" | "amount">, player: number, stacks: number[]) {
-  if (action.type !== "R" || player < 0 || player >= stacks.length) return false;
-  const stack = stacks[player];
-  return Math.abs(action.amount - stack) <= Math.max(0.001, stack * 0.0001);
+function isAllInRaise(
+  action: Pick<HrcAction, "type" | "amount">,
+  player: number,
+  context: HrcPreflopContext,
+  priorSequence: HrcSequenceAction[],
+) {
+  if (action.type !== "R" || player < 0 || player >= context.stacks.length) return false;
+  const state = replayPreflopState(context, priorSequence);
+  if (!state.active[player]) return false;
+
+  const actorCap = state.liveContributions[player] + state.remainingStacks[player];
+  const opponentCaps = state.active
+    .map((active, opponent) => active && opponent !== player
+      ? state.liveContributions[opponent] + state.remainingStacks[opponent]
+      : -1)
+    .filter((cap) => cap >= 0);
+  if (!opponentCaps.length) return false;
+
+  const effectiveRaiseTo = Math.min(actorCap, Math.max(...opponentCaps));
+  if (amountsMatch(action.amount, effectiveRaiseTo) || amountsMatch(action.amount, actorCap)) return true;
+
+  // Compatibilidade com exports/fixtures legados que codificam o shove pelo
+  // stack inicial, mesmo quando uma ante morta reduz o maior raise-to legal.
+  return amountsMatch(action.amount, context.stacks[player]);
 }
 
 function inferEquityModel(eqmodel: HrcSettings["eqmodel"]): HrcStudyImport["equityModel"] {
@@ -572,11 +736,89 @@ function normalizeAnteType(value: string, ante: number): HrcStudyImport["anteTyp
   return normalized.includes("bb") || normalized.includes("bigblind") ? "BB_ANTE" : "ANTE";
 }
 
+function createBarePreflopContext(stacks: number[]): HrcPreflopContext {
+  return {
+    stacks: [...stacks],
+    initialLiveContributions: stacks.map(() => 0),
+    deadContributions: stacks.map(() => 0),
+  };
+}
+
+function createPreflopContext(settings: HrcSettings): HrcPreflopContext {
+  const { stacks, blinds, skipSb, anteType: rawAnteType, anteMode, anteFirst } = settings.handdata;
+  const ante = Math.max(0, blinds[2] ?? 0);
+  const anteType = normalizeAnteType(`${rawAnteType} ${anteMode}`, ante);
+  const initialLiveContributions = stacks.map(() => 0);
+  const deadContributions = stacks.map(() => 0);
+  const smallBlindPlayer = stacks.length - 2;
+  const bigBlindPlayer = stacks.length - 1;
+
+  const postAntes = () => {
+    if (anteType === "NONE") return;
+    const players = anteType === "BB_ANTE"
+      ? [bigBlindPlayer]
+      : stacks.map((_, player) => player);
+    for (const player of players) {
+      const available = Math.max(0, stacks[player] - initialLiveContributions[player] - deadContributions[player]);
+      deadContributions[player] += Math.min(ante, available);
+    }
+  };
+
+  const postBlinds = () => {
+    const posts: Array<[number, number]> = [];
+    if (!skipSb) posts.push([smallBlindPlayer, Math.max(0, blinds[1] ?? 0)]);
+    posts.push([bigBlindPlayer, Math.max(0, blinds[0] ?? 0)]);
+    for (const [player, blind] of posts) {
+      const available = Math.max(0, stacks[player] - initialLiveContributions[player] - deadContributions[player]);
+      initialLiveContributions[player] += Math.min(blind, available);
+    }
+  };
+
+  if (anteFirst) {
+    postAntes();
+    postBlinds();
+  } else {
+    postBlinds();
+    postAntes();
+  }
+  return { stacks: [...stacks], initialLiveContributions, deadContributions };
+}
+
+function replayPreflopState(context: HrcPreflopContext, sequence: HrcSequenceAction[]): HrcPreflopState {
+  const liveContributions = [...context.initialLiveContributions];
+  const remainingStacks = context.stacks.map((stack, player) => Math.max(
+    0,
+    stack - context.deadContributions[player] - liveContributions[player],
+  ));
+  const active = context.stacks.map(() => true);
+
+  for (const action of sequence) {
+    if (action.street !== 0 || action.player < 0 || action.player >= context.stacks.length) continue;
+    const player = action.player;
+    if (action.type === "F") {
+      active[player] = false;
+      continue;
+    }
+    if (!active[player]) continue;
+    const additional = action.type === "R"
+      ? Math.max(0, action.amount - liveContributions[player])
+      : action.type === "C" ? action.amount : 0;
+    const committed = Math.min(additional, remainingStacks[player]);
+    liveContributions[player] += committed;
+    remainingStacks[player] -= committed;
+  }
+  return { active, liveContributions, remainingStacks };
+}
+
+function amountsMatch(left: number, right: number) {
+  return Math.abs(left - right) <= Math.max(0.001, Math.abs(right) * 0.0001);
+}
+
 function validateUpload(file: UploadedFile) {
   if (!file.name || !/\.zip$/i.test(file.name)) throw new HrcImportError("Selecione um arquivo .zip exportado pelo HRC.");
   if (!ALLOWED_MIME_TYPES.has((file.type || "").toLowerCase())) throw new HrcImportError("O tipo MIME do arquivo não corresponde a um ZIP.");
   if (file.size <= 0) throw new HrcImportError("O arquivo ZIP está vazio.");
-  if (file.size > MAX_ARCHIVE_BYTES) throw new HrcImportError("O arquivo HRC excede o limite de 25 MB.");
+  if (file.size > HRC_IMPORT_LIMITS.archiveBytes) throw new HrcImportError("O arquivo HRC excede o limite de 128 MB.");
 }
 
 function validateZipPath(name: string) {
@@ -592,8 +834,46 @@ function parseJson(source: string, name: string) {
   catch { throw new HrcImportError(`JSON inválido em ${name}.`); }
 }
 
+function parseSettings(value: unknown): HrcSettings {
+  if (!isRecord(value) || !isRecord(value.handdata) || !isRecord(value.eqmodel)) {
+    throw new HrcImportError("settings.json inválido.");
+  }
+  const stacks = strictNumberArray(value.handdata.stacks, "stacks");
+  const blinds = strictNumberArray(value.handdata.blinds, "blinds");
+  if (stacks.length < 2 || stacks.length > 10 || stacks.some((stack) => stack <= 0)) {
+    throw new HrcImportError("Stacks inválidos no settings.json.");
+  }
+  if (blinds.length < 2 || blinds[0] <= 0 || blinds[1] < 0 || blinds[1] > blinds[0] || (blinds[2] ?? 0) < 0) {
+    throw new HrcImportError("Blinds inválidos no settings.json.");
+  }
+  const eqmodelId = firstString(value.eqmodel.id, value.eqmodel.type, value.eqmodel.name, value.eqmodel.model);
+  const anteType = firstString(value.handdata.anteType);
+  const anteMode = firstString(value.handdata.anteMode, value.handdata.anteOrder, value.handdata.forcedBetOrder);
+  const anteOrder = `${anteType} ${anteMode}`.toLowerCase().replace(/[^a-z]/g, "");
+  const anteFirst = typeof value.handdata.anteFirst === "boolean"
+    ? value.handdata.anteFirst
+    : !anteOrder.includes("blindfirst");
+  return {
+    handdata: {
+      stacks,
+      blinds,
+      skipSb: Boolean(value.handdata.skipSb),
+      movingBu: Boolean(value.handdata.movingBu),
+      anteType: anteType || anteMode,
+      anteMode,
+      anteFirst,
+    },
+    eqmodel: {
+      id: eqmodelId,
+      raked: Boolean(value.eqmodel.raked),
+      metadata: withoutKeys(value.eqmodel, ["id", "raked"]),
+    },
+    metadata: structuredClone(value),
+  };
+}
+
 async function sha256(bytes: Uint8Array) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -668,6 +948,26 @@ function optionalJsonNumber(value: unknown, fallback: number, field: string) {
 
 function firstString(...values: unknown[]) {
   return values.find((value): value is string => typeof value === "string" && Boolean(value.trim()))?.trim() ?? "";
+}
+
+function firstIdentifier(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  }
+  return "";
+}
+
+function isVoluntaryAction(action: HrcSequenceAction) {
+  return action.type === "R" || (action.type === "C" && action.amount > 0);
+}
+
+function emptyIgnoredCounts(): HrcIgnoredCounts {
+  return { POSTFLOP: 0, AUTOMATIC_X: 0, UNSUPPORTED_SEQUENCE: 0, NO_ELIGIBLE_HANDS: 0, NON_TRAINABLE: 0 };
+}
+
+function emptyTrainingTypeCounts(): Record<TrainingType, number> {
+  return { PUSH_FOLD: 0, CALL_VS_SHOVE: 0, OPEN_FOLD: 0, VS_OPEN: 0, VS_3_BET: 0, VS_4_BET: 0 };
 }
 
 function roundBb(value: number) {

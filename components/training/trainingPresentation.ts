@@ -63,6 +63,12 @@ export function buildTrainingPrompt(exercise: TrainingExercise) {
   if (exercise.trainingType === "VS_OPEN") {
     return `${villain} abriu${sizing}. Você está no ${hero}. Qual é sua resposta?`;
   }
+  if (exercise.trainingType === "VS_3_BET") {
+    return `${villain} aplicou uma 3-bet${sizing} após o seu open. Você está no ${hero}. Qual é sua resposta?`;
+  }
+  if (exercise.trainingType === "VS_4_BET") {
+    return `${villain} aplicou uma 4-bet${sizing} após a sua 3-bet. Você está no ${hero}. Qual é sua resposta?`;
+  }
   if (exercise.trainingType === "OPEN_FOLD") {
     return `A ação chegou em fold até você no ${hero}. O que fazer?`;
   }

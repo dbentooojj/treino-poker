@@ -1,10 +1,13 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import type { PokerCard, Rank } from "../../lib/poker/cards";
 import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext } from "../../lib/training";
 import { PlayingCard } from "../play/PlayingCard";
 import { UnifiedActionPanel } from "./UnifiedActionPanel";
 import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
 import { UnifiedResultPanel } from "./UnifiedResultPanel";
-import { buildTrainingPrompt, normalizeTrainingPosition, trainingTableSeats } from "./trainingPresentation";
+import { buildTrainingPrompt, normalizeTrainingPosition, sequenceActionLabel, trainingTableSeats } from "./trainingPresentation";
 
 export type SpotFeedback = {
   answer: AnswerEvaluation;
@@ -18,18 +21,32 @@ export function HeroHand({ handClass, compact = false, animate = false }: { hand
   </div>;
 }
 
-export function TrainingDecision({ exercise, busy, feedback, nextLabel = "Próximo spot", onChoose, onRepeat, onNext }: {
+export function TrainingDecision({ exercise, busy, feedback, nextLabel = "Próximo spot", replayFromStart = false, onChoose, onRepeat, onNext }: {
   exercise: TrainingExercise;
   busy: boolean;
   feedback?: SpotFeedback | null;
   nextLabel?: string;
+  replayFromStart?: boolean;
   onChoose: (action: TrainingAction) => void;
   onRepeat?: () => void;
   onNext?: () => void;
 }) {
+  const [sequenceStep, setSequenceStep] = useState(() => replayFromStart ? 0 : exercise.actionSequence.length);
+  useEffect(() => {
+    if (!replayFromStart || sequenceStep >= exercise.actionSequence.length) return;
+    const timer = window.setTimeout(() => setSequenceStep((current) => Math.min(current + 1, exercise.actionSequence.length)), 650);
+    return () => window.clearTimeout(timer);
+  }, [exercise.actionSequence.length, replayFromStart, sequenceStep]);
+  const replaying = replayFromStart && sequenceStep < exercise.actionSequence.length;
+  const nextSequenceAction = exercise.actionSequence[sequenceStep];
+  const visibleActionCount = replaying ? sequenceStep + 1 : sequenceStep;
   return <section className="spot-training-decision" aria-labelledby="training-question">
-    <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise}/></div>
-    {feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>}
+    <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise} visibleActionCount={visibleActionCount}/></div>
+    {replaying ? <div className="spot-sequence-replay" role="status" aria-live="polite">
+      <span>DESDE O INÍCIO</span>
+      <b>{nextSequenceAction?.position ?? `Ação ${sequenceStep + 1}`} {nextSequenceAction ? sequenceActionLabel(nextSequenceAction, sequenceStep, exercise.actionSequence) : ""}</b>
+      <small>{sequenceStep + 1} de {exercise.actionSequence.length}</small>
+    </div> : feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>}
   </section>;
 }
 
@@ -63,9 +80,9 @@ function previewTableSeats(context: TrainingTableContext) {
   return visibleTrainingTableSeats(context.playersCount, context.heroPosition);
 }
 
-function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
+function SpotPokerTable({ exercise, visibleActionCount = exercise.actionSequence.length }: { exercise: TrainingExercise; visibleActionCount?: number }) {
   const actionHistory = new Map<string, TrainingSequenceAction>();
-  exercise.actionSequence.forEach((action) => {
+  exercise.actionSequence.slice(0, visibleActionCount).forEach((action) => {
     if (action.position) actionHistory.set(normalizeTrainingPosition(action.position), action);
   });
   const heroPosition = normalizeTrainingPosition(exercise.heroPosition);
@@ -73,6 +90,8 @@ function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
     const normalized = normalizeTrainingPosition(seat.position);
     const hero = normalized === heroPosition;
     const sequenceEntry = actionHistory.get(normalized);
+    const latestAction = exercise.actionSequence[visibleActionCount - 1];
+    const isLatestActor = latestAction?.position && normalizeTrainingPosition(latestAction.position) === normalized;
     return {
       position: seat.label,
       positionKey: seat.position,
@@ -81,9 +100,13 @@ function SpotPokerTable({ exercise }: { exercise: TrainingExercise }) {
       cardsVisible: hero,
       visibleCards: hero ? 2 : 0,
       hero,
-      active: hero,
+      active: visibleActionCount >= exercise.actionSequence.length ? hero : Boolean(isLatestActor),
       folded: sequenceEntry?.type === "FOLD",
       dealer: seat.dealer,
+      action: isLatestActor && latestAction ? {
+        label: sequenceActionLabel(latestAction, visibleActionCount - 1, exercise.actionSequence),
+        tone: latestAction.label?.toLowerCase().includes("all-in") ? "all_in" : latestAction.type.toLowerCase(),
+      } : undefined,
     };
   });
   return <UnifiedPokerTable
@@ -161,12 +184,15 @@ function handClassPokerCards(handClass: string): [PokerCard, PokerCard] {
 }
 
 function mainActionLabel(action: TrainingAction, exercise: TrainingExercise) {
+  if (action.label) return action.label;
   if (action.type === "FOLD") return "Fold";
   if (action.type === "CHECK") return "Check";
   if (action.type === "CALL") return "Call";
   if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - .01) return "All-in";
   if (exercise.trainingType === "OPEN_FOLD") return "Open";
   if (exercise.trainingType === "VS_OPEN") return "3-bet";
+  if (exercise.trainingType === "VS_3_BET") return "4-bet";
+  if (exercise.trainingType === "VS_4_BET") return "5-bet";
   return action.type === "BET" ? "Bet" : "Raise";
 }
 
@@ -176,6 +202,7 @@ function actionResultLabel(action: TrainingAction, exercise: TrainingExercise) {
 }
 
 function actionTone(action: TrainingAction, exercise: TrainingExercise) {
+  if (action.label?.toLowerCase().includes("all-in")) return "all_in";
   if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - .01) return "all_in";
   return action.type.toLowerCase();
 }

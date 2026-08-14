@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProgressExperience from "../app/progresso/progress-experience";
-import { TrainingReportView } from "../app/training-experience";
+import { nextReplayAttempt, TrainingReportView } from "../app/training-experience";
 import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import {
   buildTrainingPrompt,
@@ -57,6 +57,62 @@ test("renderiza grades de 2, 3 e 4 ações sem assumir uma combinação fixa", (
     assert.match(markup, new RegExp(`play-action-buttons actions-${actions.length}`));
     assert.equal((markup.match(/<button/g) ?? []).length, actions.length);
   }
+});
+
+test("all-in efetivo abaixo do stack nominal mantém texto e estado visual de all-in", () => {
+  const effectiveAllIn: TrainingAction = { id: "effective-all-in", type: "RAISE", amountBb: 19, label: "All-in" };
+  const exercise = makeExercise(8, [fold, effectiveAllIn], "SB");
+  exercise.heroStackBb = 20;
+  const decisionMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  assert.match(decisionMarkup, /play-action-button--all_in/);
+  assert.match(decisionMarkup, /<b>All-in 19 BB<\/b>/);
+
+  exercise.actionSequence = [{ position: "SB", type: "RAISE", amountBb: 19, label: "All-in" }];
+  const replayMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} replayFromStart onChoose={() => undefined}/>);
+  assert.match(replayMarkup, /play-action-tag--all_in/);
+  assert.match(replayMarkup, /all-in 19 BB/);
+});
+
+test("Desde o início reproduz actionSequence antes da mesma decisão", async () => {
+  const exercise = makeExercise(6, [fold, call], "BB");
+  exercise.actionSequence = [
+    { position: "UTG", type: "FOLD" },
+    { position: "HJ", type: "FOLD" },
+    { position: "BTN", type: "RAISE", amountBb: 2.3 },
+    { position: "SB", type: "FOLD" },
+  ];
+  const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} replayFromStart onChoose={() => undefined}/>);
+  assert.match(markup, /DESDE O INÍCIO/);
+  assert.match(markup, /UTG fold/);
+  assert.match(markup, /play-seat--folded[^>]*data-position="UTG"/);
+  assert.doesNotMatch(markup, /play-action-buttons/);
+  const [trainer, schema] = await Promise.all([
+    readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(trainer, /presentationMode === "FROM_START"/);
+  assert.match(trainer, /replayFromStart=/);
+  assert.match(schema, /presentationMode: trainingPresentationMode/);
+  assert.doesNotMatch(schema, /training_type[^\n]*FROM_START/);
+});
+
+test("Repetir spot cria uma nova tentativa e reinicia o replay FROM_START", async () => {
+  assert.equal(nextReplayAttempt(0, "FROM_START"), 1);
+  assert.equal(nextReplayAttempt(1, "FROM_START"), 2);
+  assert.equal(nextReplayAttempt(0, "DECISION"), 0);
+
+  const trainer = await readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8");
+  assert.match(trainer, /setReplayAttempt\(\(current\) => nextReplayAttempt\(current, session\.config\.presentationMode\)\)/);
+  assert.match(trainer, /key=\{`\$\{exercise\.trainingHandId\}:\$\{session\.config\.presentationMode \?\? "DECISION"\}:\$\{replayAttempt\}`\}/);
+});
+
+test("Visualizar distingue classes armazenadas das elegíveis para treino", async () => {
+  const admin = await readFile(new URL("../app/admin/studies/studies-experience.tsx", import.meta.url), "utf8");
+  assert.match(admin, /Classes de mão armazenadas/);
+  assert.match(admin, /Classes elegíveis para treino/);
+  assert.match(admin, /classes armazenadas/);
+  assert.match(admin, /elegíveis para treino/);
+  assert.doesNotMatch(admin, /<dt>Mãos<\/dt>/);
 });
 
 test("renderiza a quantidade correta de seats em heads-up, 6-max e 9-max", () => {

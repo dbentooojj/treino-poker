@@ -32,7 +32,7 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   await migrate(getDb(), { migrationsFolder: "drizzle" });
   const sqlClient = getSqlClient();
   const [{ count: migrationCount }] = await sqlClient<{ count: number }[]>`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-  assert.equal(migrationCount, 8, "as migrations devem ser aplicadas");
+  assert.equal(migrationCount, 9, "as migrations devem ser aplicadas");
 
   const [{ data_type: hashType }] = await sqlClient<{ data_type: string }[]>`
     SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'training_sets' AND column_name = 'content_hash'`;
@@ -169,6 +169,7 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   const [{ count: remainingResetTokens }] = await sqlClient<{ count: number }[]>`
     SELECT count(*)::int AS count FROM password_reset_tokens WHERE user_id = ${publicUser.id}`;
   assert.equal(remainingResetTokens, 0, "um reset consumido deve invalidar todos os tokens do usuário");
+  const publicLogin = await createSession(publicUser.id, false);
 
   const zip = zipFile("study.zip", "A7s", 2.5);
   const formData = new FormData();
@@ -186,7 +187,42 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   assert.equal(imported.study.isPublished, false);
 
   const counts = await entityCounts(sqlClient);
-  assert.deepEqual(counts, { sets: 1, nodes: 2, hands: 338, sessions: 0 }, "cada node importado deve preservar as 169 classes canônicas");
+  assert.deepEqual(counts, { sets: 1, nodes: 2, hands: 338, sessions: 0, sourceNodes: 5, sourceEdges: 4 }, "cada node treinável deve preservar as 169 classes canônicas e a árvore fonte leve completa");
+  const sourceEdges = await sqlClient<{ child_reference: string; child_node_id: string | null }[]>`
+    SELECT child_reference, child_node_id FROM hrc_source_edges WHERE training_set_id = ${imported.study.id} ORDER BY child_reference`;
+  for (const reference of ["1", "nodes/1.json"]) {
+    const matching = sourceEdges.filter((edge) => edge.child_reference === reference);
+    assert.ok(matching.length > 0, `a referência ${reference} deve ser preservada`);
+    assert.ok(matching.every((edge) => edge.child_node_id === matching[0].child_node_id && edge.child_node_id), `a referência ${reference} deve resolver para o mesmo source node`);
+  }
+  const numericAndString = sourceEdges.filter((edge) => edge.child_reference === "1");
+  assert.equal(numericAndString.length, 2, "node 1 e node \"1\" devem preservar as duas edges");
+  assert.equal(numericAndString[0].child_node_id, sourceEdges.find((edge) => edge.child_reference === "nodes/1.json")?.child_node_id);
+  const missingEdge = sourceEdges.find((edge) => edge.child_reference === "nodes/missing.json");
+  assert.equal(missingEdge?.child_node_id, null, "referência inexistente deve permanecer identificável e sem FK inventada");
+
+  const { GET: viewStudyRoute, DELETE: deleteStudyRoute } = await import("../app/api/studies/[id]/route");
+  const inventoryContext = { params: Promise.resolve({ id: imported.study.id }) };
+  const anonymousInventory = await viewStudyRoute(new Request(`http://localhost/api/studies/${imported.study.id}`), inventoryContext);
+  assert.equal(anonymousInventory.status, 401, "o inventário exige sessão");
+  const memberInventory = await viewStudyRoute(new Request(`http://localhost/api/studies/${imported.study.id}`, {
+    headers: { cookie: `rangelab_session=${publicLogin.token}` },
+  }), inventoryContext);
+  assert.equal(memberInventory.status, 403, "o inventário é exclusivo de admin");
+  const adminInventory = await viewStudyRoute(new Request(`http://localhost/api/studies/${imported.study.id}?page=1&pageSize=1`, {
+    headers: { cookie: `rangelab_session=${login.token}` },
+  }), inventoryContext);
+  const inventoryPayload = await adminInventory.json() as { inventory: { study: { sourceNodeCount: number; trainingNodeCount: number; storedHandClassCount: number; eligibleTrainingHandClassCount: number }; spots: Array<{ storedHandClassCount: number; eligibleTrainingHandClassCount: number }>; pagination: { total: number } } };
+  assert.equal(adminInventory.status, 200);
+  assert.equal(inventoryPayload.inventory.study.sourceNodeCount, 5);
+  assert.equal(inventoryPayload.inventory.study.trainingNodeCount, 2);
+  assert.equal(inventoryPayload.inventory.study.storedHandClassCount, 338);
+  assert.equal(inventoryPayload.inventory.study.eligibleTrainingHandClassCount, 336);
+  assert.equal(inventoryPayload.inventory.pagination.total, 2);
+  assert.equal(inventoryPayload.inventory.spots.length, 1, "a API deve paginar os spots");
+  assert.equal(inventoryPayload.inventory.spots[0].storedHandClassCount, 169);
+  assert.equal(inventoryPayload.inventory.spots[0].eligibleTrainingHandClassCount, 168);
+  assert.doesNotMatch(JSON.stringify(inventoryPayload), /"strategy"|"evs"/, "o inventário não pode carregar training_hands indiscriminadamente");
 
   const duplicateForm = new FormData();
   duplicateForm.set("file", zip);
@@ -233,6 +269,18 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
       count(*) FILTER (WHERE status <> 'ARCHIVED')::int AS active
     FROM training_sets WHERE content_hash = ${reimportStudy.contentHash}`;
   assert.deepEqual({ archived, active }, { archived: 1, active: 1 });
+  const hardDeleteResponse = await deleteStudyRoute(new Request(`http://localhost/api/studies/${replacementVersion.id}`, {
+    method: "DELETE",
+    headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
+  }), { params: Promise.resolve({ id: replacementVersion.id }) });
+  assert.equal(hardDeleteResponse.status, 200, "estudo despublicado sem histórico deve ser excluído");
+  const [hardDeleteCounts] = await sqlClient<{ sets: number; nodes: number; hands: number; source_nodes: number }[]>`
+    SELECT
+      (SELECT count(*)::int FROM training_sets WHERE id = ${replacementVersion.id}) AS sets,
+      (SELECT count(*)::int FROM training_nodes WHERE training_set_id = ${replacementVersion.id}) AS nodes,
+      (SELECT count(*)::int FROM training_hands WHERE training_node_id IN (SELECT id FROM training_nodes WHERE training_set_id = ${replacementVersion.id})) AS hands,
+      (SELECT count(*)::int FROM hrc_source_nodes WHERE training_set_id = ${replacementVersion.id}) AS source_nodes`;
+  assert.deepEqual(hardDeleteCounts, { sets: 0, nodes: 0, hands: 0, source_nodes: 0 }, "o hard delete deve usar os cascades dos filhos estritos");
 
   const { actionKey } = await import("../lib/training");
   const { answerTrainingSession, createTrainingSession, finishTrainingSession, getTrainingOptions, getTrainingReport } = await import("../db/training");
@@ -263,14 +311,39 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   assert.equal((await getTrainingOptions(config)).hasMatches, false, "estudo importado não deve aparecer ao aluno");
 
   const { setStudyPublished } = await import("../db/studies");
+  const emptyStudy = toHrcStudyImport(await parseHrcPack(zipFile("empty-training.zip", "QJs", 1)));
+  emptyStudy.contentHash = "a".repeat(64);
+  emptyStudy.name = "Sem spots treináveis";
+  emptyStudy.nodes = [];
+  emptyStudy.sourceNodes = emptyStudy.sourceNodes.map((node) => ({ ...node, trainingNodeKey: null, ignoredReason: "NON_TRAINABLE" }));
+  const emptyPersisted = await persistHrcStudy(emptyStudy, adminUser.id);
+  await assert.rejects(setStudyPublished(emptyPersisted.id, true), /não possui spots treináveis/, "publicação vazia deve ser bloqueada no backend");
+  const emptyDelete = await deleteStudyRoute(new Request(`http://localhost/api/studies/${emptyPersisted.id}`, {
+    method: "DELETE",
+    headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
+  }), { params: Promise.resolve({ id: emptyPersisted.id }) });
+  assert.equal(emptyDelete.status, 200);
+  await sqlClient`UPDATE training_sets SET metadata = jsonb_set(metadata, '{validationVersion}', '2'::jsonb) WHERE id = ${imported.study.id}`;
   assert.equal(await setStudyPublished(imported.study.id, true), true);
+  await sqlClient`UPDATE training_sets SET metadata = jsonb_set(metadata, '{validationVersion}', '3'::jsonb) WHERE id = ${imported.study.id}`;
+  const publishedDelete = await deleteStudyRoute(new Request(`http://localhost/api/studies/${imported.study.id}`, {
+    method: "DELETE",
+    headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
+  }), { params: Promise.resolve({ id: imported.study.id }) });
+  assert.equal(publishedDelete.status, 409);
+  assert.deepEqual(await publishedDelete.json(), { error: "Despublique o estudo antes de excluí-lo." });
   const publishedOptions = await getTrainingOptions(config);
   assert.equal(publishedOptions.hasMatches, true, "estudo publicado deve aparecer nos filtros");
   assert.deepEqual(publishedOptions.trainingTypes, ["PUSH_FOLD"]);
 
-  const anySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1 } });
+  const beforeFromStart = await entityCounts(sqlClient);
+  const anySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1, presentationMode: "FROM_START" } });
   assert.equal(anySession.config.trainingType, null, "Any deve criar uma sessão sem restringir o tipo de spot");
+  assert.equal(anySession.config.presentationMode, "FROM_START", "Desde o início deve ser somente um modo de apresentação");
   assert.equal(anySession.exercise.trainingType, "PUSH_FOLD", "a pergunta continua preservando sua categoria real");
+  const afterFromStart = await entityCounts(sqlClient);
+  assert.equal(afterFromStart.nodes, beforeFromStart.nodes, "Desde o início não duplica training_nodes");
+  assert.equal(afterFromStart.hands, beforeFromStart.hands, "Desde o início não duplica training_hands");
   await finishTrainingSession(adminUser.id, anySession.id);
 
   await sqlClient`UPDATE training_hands SET strategy = '{"action-0":0.4,"action-1":0.6}'::jsonb, is_mixed = true
@@ -349,6 +422,49 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   await sqlClient`UPDATE training_sets SET display_order = 10 WHERE id = ${second.id}`;
   await setStudyPublished(second.id, true);
 
+  const queueOnlySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1 } });
+  const [secondExercise] = await sqlClient<{ training_node_id: string; training_hand_id: string }[]>`
+    SELECT n.id AS training_node_id, h.id AS training_hand_id
+    FROM training_nodes n JOIN training_hands h ON h.training_node_id = n.id
+    WHERE n.training_set_id = ${second.id}
+    ORDER BY n.id, h.id
+    LIMIT 1`;
+  assert.ok(secondExercise, "o segundo estudo deve possuir exercício para a fila Qualquer");
+  const queueOnlyEntry = [{ trainingSetId: second.id, trainingNodeId: secondExercise.training_node_id, trainingHandId: secondExercise.training_hand_id }];
+  await sqlClient`UPDATE training_sessions SET exercise_queue = ${JSON.stringify(queueOnlyEntry)}::jsonb, queue_position = 0 WHERE id = ${queueOnlySession.id}`;
+  const [queueOnlyStored] = await sqlClient<{ training_set_id: string | null; exercise_queue: typeof queueOnlyEntry; queue_position: number; ended_at: Date | null }[]>`
+    SELECT training_set_id, exercise_queue, queue_position, ended_at FROM training_sessions WHERE id = ${queueOnlySession.id}`;
+  assert.equal(queueOnlyStored.training_set_id, null, "Qualquer deve persistir trainingSetId nulo");
+  assert.deepEqual(queueOnlyStored.exercise_queue, queueOnlyEntry, "a fila deve ser a única referência da sessão ao estudo alvo");
+  const [{ count: queueOnlyAnswers }] = await sqlClient<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM training_answers WHERE training_session_id = ${queueOnlySession.id} OR training_set_id = ${second.id}`;
+  assert.equal(queueOnlyAnswers, 0, "o bloqueio deve ser exercitado sem resposta vinculada ao estudo alvo");
+  const [beforeQueueDelete] = await sqlClient<{ sets: number; nodes: number; hands: number; sessions: number }[]>`
+    SELECT
+      (SELECT count(*)::int FROM training_sets WHERE id = ${second.id}) AS sets,
+      (SELECT count(*)::int FROM training_nodes WHERE training_set_id = ${second.id}) AS nodes,
+      (SELECT count(*)::int FROM training_hands WHERE training_node_id IN (SELECT id FROM training_nodes WHERE training_set_id = ${second.id})) AS hands,
+      (SELECT count(*)::int FROM training_sessions WHERE id = ${queueOnlySession.id}) AS sessions`;
+  await setStudyPublished(second.id, false);
+  const queueReferencedDelete = await deleteStudyRoute(new Request(`http://localhost/api/studies/${second.id}`, {
+    method: "DELETE",
+    headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
+  }), { params: Promise.resolve({ id: second.id }) });
+  assert.equal(queueReferencedDelete.status, 409, "a fila Qualquer deve impedir a exclusão do estudo referenciado");
+  assert.match((await queueReferencedDelete.json() as { error: string }).error, /histórico de treinamento/);
+  const [afterQueueDelete] = await sqlClient<{ sets: number; nodes: number; hands: number; sessions: number }[]>`
+    SELECT
+      (SELECT count(*)::int FROM training_sets WHERE id = ${second.id}) AS sets,
+      (SELECT count(*)::int FROM training_nodes WHERE training_set_id = ${second.id}) AS nodes,
+      (SELECT count(*)::int FROM training_hands WHERE training_node_id IN (SELECT id FROM training_nodes WHERE training_set_id = ${second.id})) AS hands,
+      (SELECT count(*)::int FROM training_sessions WHERE id = ${queueOnlySession.id}) AS sessions`;
+  assert.deepEqual(afterQueueDelete, beforeQueueDelete, "DELETE bloqueado deve preservar estudo, nodes, mãos e sessão");
+  const [queueOnlyAfterDelete] = await sqlClient<typeof queueOnlyStored[]>`
+    SELECT training_set_id, exercise_queue, queue_position, ended_at FROM training_sessions WHERE id = ${queueOnlySession.id}`;
+  assert.deepEqual(queueOnlyAfterDelete, queueOnlyStored, "DELETE bloqueado não deve alterar configuração, fila nem estado da sessão ativa");
+  await finishTrainingSession(adminUser.id, queueOnlySession.id);
+  await setStudyPublished(second.id, true);
+
   const trainingSession = await createTrainingSession(adminUser.id, { mode: "START", config });
   const [savedSession] = await sqlClient<{ training_set_id: string | null; players_count: number | null; exercise_queue: Array<{ trainingSetId: string; trainingNodeId: string; trainingHandId: string }> }[]>`
     SELECT training_set_id, players_count, exercise_queue FROM training_sessions WHERE id = ${trainingSession.id}`;
@@ -423,6 +539,12 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   assert.equal(freeReport.completionReason, "USER_FINISHED");
   assert.equal(freeReport.errors, 1);
   await setStudyPublished(imported.study.id, false);
+  const historicalDelete = await deleteStudyRoute(new Request(`http://localhost/api/studies/${imported.study.id}`, {
+    method: "DELETE",
+    headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
+  }), { params: Promise.resolve({ id: imported.study.id }) });
+  assert.equal(historicalDelete.status, 409);
+  assert.match((await historicalDelete.json() as { error: string }).error, /histórico de treinamento/);
   await assert.rejects(createTrainingSession(adminUser.id, { mode: "REVIEW_ERRORS", sourceSessionId: freeSession.id }), /não está mais disponível/, "despublicar um estudo deve revogar novas filas de revisão");
   await setStudyPublished(imported.study.id, true);
   const review = await createTrainingSession(adminUser.id, { mode: "REVIEW_ERRORS", sourceSessionId: freeSession.id });
@@ -520,6 +642,7 @@ async function proveHistoricalSessionUpgrade(adminClient: postgres.Sql, sourceUr
     await applyMigrationSql(upgrade, new URL("../drizzle/0005_quick_training_any.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0006_archived_study_reimport.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0007_email_verification.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0008_nifty_ravenous.sql", import.meta.url));
 
     const [{ email_verified_at: legacyEmailVerifiedAt }] = await upgrade<{ email_verified_at: Date | null }[]>`
       SELECT email_verified_at FROM users WHERE id = ${userId}`;
@@ -637,12 +760,14 @@ async function applyMigrationSql(sqlClient: postgres.Sql, migrationUrl: URL) {
 }
 
 async function entityCounts(sqlClient: postgres.Sql) {
-  const [row] = await sqlClient<{ sets: number; nodes: number; hands: number; sessions: number }[]>`
+  const [row] = await sqlClient<{ sets: number; nodes: number; hands: number; sessions: number; sourceNodes: number; sourceEdges: number }[]>`
     SELECT
       (SELECT count(*)::int FROM training_sets) AS sets,
       (SELECT count(*)::int FROM training_nodes) AS nodes,
       (SELECT count(*)::int FROM training_hands) AS hands,
-      (SELECT count(*)::int FROM training_sessions) AS sessions`;
+      (SELECT count(*)::int FROM training_sessions) AS sessions,
+      (SELECT count(*)::int FROM hrc_source_nodes) AS "sourceNodes",
+      (SELECT count(*)::int FROM hrc_source_edges) AS "sourceEdges"`;
   return row;
 }
 
@@ -662,25 +787,36 @@ function zipFile(name: string, handClass: string, bestEv: number) {
     handdata: { stacks: [1_000, 1_000], blinds: [100, 50, 10], skipSb: false, movingBu: true, anteType: "BB Ante" },
     eqmodel: { id: "chipEV", raked: false },
   };
-  const allHands = integrationHands(bestEv);
+  const allHands = integrationHands(bestEv, 2);
   const prioritizedHands = { [handClass]: allHands[handClass], ...allHands };
   const node = {
     player: 0,
     street: 0,
     children: 2,
     sequence: [],
-    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000 }],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000, node: 1 }],
     hands: prioritizedHands,
   };
-  const secondNode = { ...node, hands: allHands };
+  const secondNode = { ...node, actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000 }], hands: allHands };
+  const referenceNode = (child: number | string) => ({
+    player: 0,
+    street: 0,
+    children: 1,
+    sequence: [],
+    actions: [{ type: "F", amount: 0, node: child }],
+    hands: integrationHands(bestEv, 1),
+  });
   return new File([createZip({
     "settings.json": JSON.stringify(settings),
     "nodes/0.json": JSON.stringify(node),
     "nodes/1.json": JSON.stringify(secondNode),
+    "nodes/2.json": JSON.stringify(referenceNode("1")),
+    "nodes/3.json": JSON.stringify(referenceNode("nodes/1.json")),
+    "nodes/4.json": JSON.stringify(referenceNode("nodes/missing.json")),
   })], name, { type: "application/zip" });
 }
 
-function integrationHands(bestEv: number) {
+function integrationHands(bestEv: number, actionCount: number) {
   const ranks = [..."AKQJT98765432"];
   const handClasses = ranks.map((rank) => `${rank}${rank}`);
   for (let first = 0; first < ranks.length; first++) {
@@ -688,7 +824,11 @@ function integrationHands(bestEv: number) {
       handClasses.push(`${ranks[first]}${ranks[second]}s`, `${ranks[first]}${ranks[second]}o`);
     }
   }
-  return Object.fromEntries(handClasses.map((currentHand) => [currentHand, { weight: 1, played: [0, 1], evs: [0, bestEv] }]));
+  return Object.fromEntries(handClasses.map((currentHand) => {
+    const played = Array.from({ length: actionCount }, (_, index) => index === actionCount - 1 ? 1 : 0);
+    const evs = Array.from({ length: actionCount }, (_, index) => index === actionCount - 1 ? bestEv : 0);
+    return [currentHand, { weight: currentHand === "22" ? 0.005 : 1, played, evs }];
+  }));
 }
 
 function createZip(entries: Record<string, string>) {

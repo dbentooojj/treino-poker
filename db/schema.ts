@@ -21,7 +21,8 @@ export const street = pgEnum("street", ["PREFLOP"]);
 export const equityModel = pgEnum("equity_model", ["CHIP_EV", "ICM"]);
 export const evUnit = pgEnum("ev_unit", ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"]);
 export const anteType = pgEnum("ante_type", ["NONE", "ANTE", "BB_ANTE"]);
-export const trainingType = pgEnum("training_type", ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN"]);
+export const trainingType = pgEnum("training_type", ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET", "VS_4_BET"]);
+export const trainingPresentationMode = pgEnum("training_presentation_mode", ["DECISION", "FROM_START"]);
 export const trainingSetStatus = pgEnum("training_set_status", ["IMPORTED", "PUBLISHED", "ARCHIVED"]);
 export const trainingCompletionReason = pgEnum("training_completion_reason", ["COMPLETED", "USER_FINISHED"]);
 
@@ -134,11 +135,51 @@ export const trainingHands = pgTable("training_hands", {
   index("training_hands_node_id_idx").on(table.trainingNodeId),
 ]);
 
+/**
+ * Navegação leve da árvore original do HRC. As 169 estratégias continuam apenas
+ * em training_hands; esta tabela preserva contexto e identidade de todos os nodes.
+ */
+export const hrcSourceNodes = pgTable("hrc_source_nodes", {
+  id: uuid("id").primaryKey(),
+  trainingSetId: uuid("training_set_id").notNull().references(() => trainingSets.id, { onDelete: "cascade" }),
+  trainingNodeId: uuid("training_node_id").references(() => trainingNodes.id, { onDelete: "set null" }),
+  sourceNodeId: text("source_node_id").notNull(),
+  sourcePath: text("source_path").notNull(),
+  player: integer("player").notNull(),
+  street: integer("street").notNull(),
+  actionSequence: jsonb("action_sequence").$type<Array<Record<string, unknown>>>().notNull(),
+  actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull(),
+  isTrainable: boolean("is_trainable").notNull().default(false),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+}, (table) => [
+  uniqueIndex("hrc_source_nodes_set_source_unique").on(table.trainingSetId, table.sourceNodeId),
+  uniqueIndex("hrc_source_nodes_set_path_unique").on(table.trainingSetId, table.sourcePath),
+  index("hrc_source_nodes_set_street_idx").on(table.trainingSetId, table.street),
+  index("hrc_source_nodes_training_node_idx").on(table.trainingNodeId),
+  check("hrc_source_nodes_street_check", sql`${table.street} >= 0`),
+]);
+
+export const hrcSourceEdges = pgTable("hrc_source_edges", {
+  id: uuid("id").primaryKey(),
+  trainingSetId: uuid("training_set_id").notNull().references(() => trainingSets.id, { onDelete: "cascade" }),
+  parentNodeId: uuid("parent_node_id").notNull().references(() => hrcSourceNodes.id, { onDelete: "cascade" }),
+  actionIndex: integer("action_index").notNull(),
+  childReference: text("child_reference").notNull(),
+  childNodeId: uuid("child_node_id").references(() => hrcSourceNodes.id, { onDelete: "set null" }),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+}, (table) => [
+  uniqueIndex("hrc_source_edges_parent_action_unique").on(table.parentNodeId, table.actionIndex),
+  index("hrc_source_edges_set_idx").on(table.trainingSetId),
+  index("hrc_source_edges_child_idx").on(table.childNodeId),
+  check("hrc_source_edges_action_index_check", sql`${table.actionIndex} >= 0`),
+]);
+
 export const trainingSessions = pgTable("training_sessions", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   trainingSetId: uuid("training_set_id").references(() => trainingSets.id, { onDelete: "restrict" }),
   trainingType: trainingType("training_type"),
+  presentationMode: trainingPresentationMode("presentation_mode").notNull().default("DECISION"),
   equityModel: equityModel("equity_model").notNull(),
   playersCount: integer("players_count"),
   stackBb: doublePrecision("stack_bb"),

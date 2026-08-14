@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
 import { deflateRawSync } from "node:zlib";
-import { HrcImportError, parseHrcPack, summarizeHrcStudy, toHrcStudyImport, validateHrcPack } from "../lib/hrc-import";
+import { HrcImportError, normalizeHrcNodeReference, parseHrcPack, summarizeHrcStudy, toHrcStudyImport, validateHrcPack } from "../lib/hrc-import";
 
 const settings = {
   handdata: {
@@ -14,6 +14,24 @@ const settings = {
   },
   eqmodel: { id: "chipEV", raked: false },
 };
+
+const effectiveBbaSettings = {
+  ...settings,
+  handdata: {
+    ...settings.handdata,
+    stacks: Array.from({ length: 8 }, () => 2_000),
+    blinds: [100, 50, 100],
+    anteType: "BB Ante",
+    anteMode: "Ante First",
+  },
+};
+
+const foldsToSmallBlind = Array.from({ length: 6 }, (_, player) => ({
+  player,
+  street: 0,
+  type: "F",
+  amount: 0,
+}));
 
 const pushNode = {
   player: 0,
@@ -58,9 +76,10 @@ test("aceita um Complete Export válido e preserva estratégia, EVs e metadados"
   const summary = summarizeHrcStudy(study);
 
   assert.match(pack.contentHash, /^[a-f0-9]{64}$/);
+  assert.equal(Object.keys(pack.nodes[0].hands).length, 169, "conversões de inspeção preservam o pack de entrada por padrão");
   assert.equal(study.playersCount, 2);
   assert.equal(study.evUnit, "UNKNOWN", "o importador não deve inventar a unidade do EV ChipEV");
-  assert.equal(study.metadata.validationVersion, 2);
+  assert.equal(study.metadata.validationVersion, 3);
   assert.equal(study.stackBb, 10);
   assert.equal(study.ante, 10);
   assert.equal(study.anteType, "BB_ANTE");
@@ -78,7 +97,7 @@ test("rejeita ZIP inválido", async () => {
 });
 
 test("limita a quantidade de nodes antes de expandir milhões de mãos", () => {
-  assert.throws(() => validateHrcPack({ name: "oversized", settings, nodes: Array.from({ length: 501 }, () => pushNode) }), /Quantidade de nodes/);
+  assert.throws(() => validateHrcPack({ name: "oversized", settings, nodes: Array.from({ length: 20_001 }, () => pushNode) }), /Quantidade de nodes/);
 });
 
 test("aceita o método deflate usado por ZIPs reais", async () => {
@@ -111,9 +130,10 @@ test("aceita X automático, ignora o node estrutural e registra ignoredNodes.AUT
 
   assert.equal(pack.nodes.length, 2);
   assert.equal(study.nodes.length, 1);
-  assert.deepEqual(study.ignoredNodes, { AUTOMATIC_X: 1 });
-  assert.deepEqual(study.metadata.ignoredNodes, { AUTOMATIC_X: 1 });
-  assert.deepEqual(summary.ignoredNodes, { AUTOMATIC_X: 1 });
+  const expected = { POSTFLOP: 0, AUTOMATIC_X: 1, UNSUPPORTED_SEQUENCE: 0, NO_ELIGIBLE_HANDS: 0, NON_TRAINABLE: 0 };
+  assert.deepEqual(study.ignoredNodes, expected);
+  assert.deepEqual(study.metadata.ignoredNodes, expected);
+  assert.deepEqual(summary.ignoredNodes, expected);
 });
 
 test("rejeita X que não segue integralmente o padrão automático", async (context) => {
@@ -261,6 +281,430 @@ test("não confunde open raise com shove", async () => {
   assert.equal(study.nodes[0].trainingType, "OPEN_FOLD");
   assert.equal(study.nodes[0].availableActions[1].label, undefined);
 });
+
+test("mantém rejeição de arquivo interno excessivo", async () => {
+  const bytes = createZip({
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(pushNode),
+  }, true);
+  falsifyUncompressedSize(bytes, "nodes/0.json", 9 * 1024 * 1024);
+  const file = new File([bytes], "study.zip", { type: "application/zip" }) as unknown as Parameters<typeof parseHrcPack>[0];
+  await assert.rejects(parseHrcPack(file), /Arquivo interno muito grande/);
+});
+
+test("classifica RFI com raise normal e shove sem colapsar sizings", async () => {
+  const node = {
+    ...pushNode,
+    children: 4,
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "R", amount: 230 },
+      { type: "R", amount: 250 },
+      { type: "R", amount: 1_000 },
+    ],
+    hands: strategyHands([0.1, 0.2, 0.3, 0.4], [0, 1, 2, 3]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "OPEN_FOLD");
+  assert.deepEqual(study.nodes[0].availableActions.map((action) => action.amountBb ?? null), [null, 2.3, 2.5, 10]);
+  assert.deepEqual(Object.keys(study.nodes[0].hands[0].strategy), ["action-0", "action-1", "action-2", "action-3"]);
+});
+
+test("A) RFI reconhece R1900 como all-in efetivo do SB com BBA Ante First", async () => {
+  const node = {
+    ...pushNode,
+    player: 6,
+    children: 3,
+    sequence: foldsToSmallBlind,
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "R", amount: 350 },
+      { type: "R", amount: 1_900 },
+    ],
+    hands: strategyHands([0.2, 0.3, 0.5], [0, 1, 2]),
+  };
+
+  const study = await studyFromNodes([node], effectiveBbaSettings);
+  assert.equal(study.nodes[0].trainingType, "OPEN_FOLD");
+  assert.deepEqual(study.nodes[0].availableActions.map((action) => action.amountBb ?? null), [null, 3.5, 19]);
+  assert.deepEqual(study.nodes[0].availableActions.map((action) => action.label), [undefined, undefined, "All-in"]);
+});
+
+test("B) Push puro com R1900 efetivo é PUSH_FOLD", async () => {
+  const node = {
+    ...pushNode,
+    player: 6,
+    sequence: foldsToSmallBlind,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_900 }],
+    hands: strategyHands([0.35, 0.65], [0, 2]),
+  };
+
+  const study = await studyFromNodes([node], effectiveBbaSettings);
+  assert.equal(study.nodes[0].trainingType, "PUSH_FOLD");
+  assert.equal(study.nodes[0].availableActions[1].label, "All-in");
+});
+
+test("C) BB enfrentando R1900 efetivo do SB é CALL_VS_SHOVE e preserva label na sequência", async () => {
+  const node = {
+    ...callNode,
+    player: 7,
+    sequence: [...foldsToSmallBlind, { player: 6, street: 0, type: "R", amount: 1_900 }],
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 1_800 }],
+    hands: strategyHands([0.45, 0.55], [-1, 0.5]),
+  };
+
+  const study = await studyFromNodes([node], effectiveBbaSettings);
+  assert.equal(study.nodes[0].trainingType, "CALL_VS_SHOVE");
+  assert.equal(study.nodes[0].villainPosition, "SB");
+  assert.equal(study.nodes[0].actionSequence.at(-1)?.amountBb, 19);
+  assert.equal(study.nodes[0].actionSequence.at(-1)?.label, "All-in");
+});
+
+test("D) stacks assimétricos recalculam o teto efetivo quando o maior oponente folda", async () => {
+  const asymmetricSettings = {
+    ...settings,
+    handdata: {
+      ...settings.handdata,
+      stacks: [2_000, 3_000, 1_000],
+      blinds: [100, 50, 0],
+      anteType: "None",
+      anteMode: "Ante First",
+    },
+  };
+  const beforeFold = {
+    ...pushNode,
+    player: 1,
+    sequence: [],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 2_000 }],
+    hands: strategyHands([0.4, 0.6], [0, 1]),
+  };
+  const afterFold = {
+    ...pushNode,
+    player: 1,
+    children: 3,
+    sequence: [{ player: 0, street: 0, type: "F", amount: 0 }],
+    actions: [
+      { type: "F", amount: 0 },
+      { type: "R", amount: 1_000 },
+      { type: "R", amount: 2_000 },
+    ],
+    hands: strategyHands([0.2, 0.5, 0.3], [0, 1, 2]),
+  };
+
+  const study = await studyFromNodes([beforeFold, afterFold], asymmetricSettings);
+  assert.equal(study.nodes[0].trainingType, "PUSH_FOLD");
+  assert.equal(study.nodes[0].availableActions[1].label, "All-in", "o oponente de 2000 ainda define o teto contestável");
+  assert.equal(study.nodes[1].trainingType, "OPEN_FOLD");
+  assert.equal(study.nodes[1].availableActions[1].label, "All-in", "após o fold, o oponente de 1000 define o teto");
+  assert.equal(study.nodes[1].availableActions[2].label, undefined, "o maior sizing não deve ser presumido all-in");
+});
+
+test("E) BBA morto reduz o all-in efetivo do SB de R2000 para R1900", async () => {
+  const node = {
+    ...pushNode,
+    player: 6,
+    sequence: foldsToSmallBlind,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_900 }],
+    hands: strategyHands([0.25, 0.75], [0, 1]),
+  };
+  const withoutAnte = {
+    ...effectiveBbaSettings,
+    handdata: {
+      ...effectiveBbaSettings.handdata,
+      blinds: [100, 50, 0],
+      anteType: "None",
+    },
+  };
+
+  const withBba = await studyFromNodes([node], effectiveBbaSettings);
+  const withoutBba = await studyFromNodes([node], withoutAnte);
+  assert.equal(withBba.nodes[0].trainingType, "PUSH_FOLD");
+  assert.equal(withBba.nodes[0].availableActions[1].label, "All-in");
+  assert.equal(withoutBba.nodes[0].trainingType, "OPEN_FOLD");
+  assert.equal(withoutBba.nodes[0].availableActions[1].label, undefined);
+});
+
+test("F) ante convencional morto reconhece R1900 como all-in efetivo", async () => {
+  const conventionalAnteSettings = {
+    ...effectiveBbaSettings,
+    handdata: {
+      ...effectiveBbaSettings.handdata,
+      anteType: "Ante",
+      anteMode: "Ante First",
+    },
+  };
+  const node = {
+    ...pushNode,
+    player: 0,
+    sequence: [],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_900 }],
+    hands: strategyHands([0.3, 0.7], [0, 1]),
+  };
+
+  const study = await studyFromNodes([node], conventionalAnteSettings);
+  assert.equal(study.nodes[0].trainingType, "PUSH_FOLD");
+  assert.equal(study.nodes[0].availableActions[1].amountBb, 19);
+  assert.equal(study.nodes[0].availableActions[1].label, "All-in");
+});
+
+test("preserva Complete do SB como ação independente em RFI", async () => {
+  const node = {
+    ...pushNode,
+    children: 4,
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 100 }, { type: "R", amount: 350 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.1, 0.2, 0.3, 0.4], [0, 1, 2, 3]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "OPEN_FOLD");
+  assert.equal(study.nodes[0].availableActions[1].label, "Complete");
+  assert.equal(study.nodes[0].availableActions[1].type, "CALL");
+});
+
+test("classifica vs Open com call, 3-bet e shove", async () => {
+  const node = {
+    ...callNode,
+    sequence: [{ player: 0, street: 0, type: "R", amount: 230 }],
+    children: 4,
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 230 }, { type: "R", amount: 700 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.1, 0.2, 0.3, 0.4], [-1, 0, 1, 2]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "VS_OPEN");
+  assert.equal(study.nodes[0].availableActions.length, 4);
+  assert.equal(study.nodes[0].availableActions[3].label, "All-in");
+});
+
+test("não classifica raise sobre limp como VS_OPEN", async () => {
+  const limpRaiseNode = {
+    ...callNode,
+    sequence: [
+      { player: 0, street: 0, type: "C", amount: 100 },
+      { player: 0, street: 0, type: "R", amount: 350 },
+    ],
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 350 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.2, 0.5, 0.3], [-1, 0, 1]),
+  };
+  const study = await studyFromNodes([limpRaiseNode]);
+  assert.equal(study.nodes.length, 0);
+  assert.equal(study.ignoredNodes.UNSUPPORTED_SEQUENCE, 1);
+});
+
+test("Hero opener enfrentando 3-bet é VS_3_BET", async () => {
+  const node = {
+    ...callNode,
+    player: 0,
+    sequence: [
+      { player: 0, street: 0, type: "R", amount: 230 },
+      { player: 1, street: 0, type: "R", amount: 700 },
+    ],
+    children: 4,
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 700 }, { type: "R", amount: 900 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.2, 0.2, 0.3, 0.3], [-1, 0, 1, 2]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "VS_3_BET");
+});
+
+test("cold 4-bet não é confundido com VS_3_BET", async () => {
+  const threeMaxSettings = { ...settings, handdata: { ...settings.handdata, stacks: [1_000, 1_000, 1_000] } };
+  const node = {
+    ...callNode,
+    player: 2,
+    sequence: [
+      { player: 0, street: 0, type: "R", amount: 230 },
+      { player: 1, street: 0, type: "R", amount: 700 },
+    ],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 950 }],
+    hands: strategyHands([0.5, 0.5], [0, 1]),
+  };
+  const study = await studyFromNodes([node], threeMaxSettings);
+  assert.equal(study.nodes.length, 0);
+  assert.equal(study.ignoredNodes.UNSUPPORTED_SEQUENCE, 1);
+});
+
+test("Hero 3-bettor enfrentando 4-bet é VS_4_BET", async () => {
+  const node = {
+    ...callNode,
+    player: 1,
+    sequence: [
+      { player: 0, street: 0, type: "R", amount: 230 },
+      { player: 1, street: 0, type: "R", amount: 650 },
+      { player: 0, street: 0, type: "R", amount: 850 },
+    ],
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 850 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.2, 0.3, 0.5], [-1, 0, 1]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "VS_4_BET");
+});
+
+test("vs Shove deriva do último raise all-in e preserva ações adicionais", async () => {
+  const node = {
+    ...callNode,
+    children: 3,
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 900 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.2, 0.5, 0.3], [-1, 0, 1]),
+  };
+  const study = await studyFromNodes([node]);
+  assert.equal(study.nodes[0].trainingType, "CALL_VS_SHOVE");
+  assert.equal(study.nodes[0].availableActions.length, 3);
+});
+
+test("mixed strategy com três ações mantém frequências, EVs e IDs independentes", async () => {
+  const node = {
+    ...pushNode,
+    children: 3,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 230 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.2, 0.3, 0.5], [-0.5, 0.2, 0.7]),
+  };
+  const study = await studyFromNodes([node]);
+  const hand = study.nodes[0].hands[0];
+  assert.equal(hand.isMixed, true);
+  assert.deepEqual(hand.strategy, { "action-0": 0.2, "action-1": 0.3, "action-2": 0.5 });
+  assert.deepEqual(hand.evs, { "action-0": -0.5, "action-1": 0.2, "action-2": 0.7 });
+});
+
+test("preserva source node não treinável e ligação action → child sem duplicar mãos", async () => {
+  const parent = { ...pushNode, actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000, node: 1 }] };
+  const child = { player: -1, street: 0, children: 0, sequence: [], actions: [], hands: {} };
+  const study = await studyFromNodes([parent, child]);
+  assert.equal(study.sourceNodes.length, 2);
+  assert.equal(study.sourceNodes[0].actions[1].node, 1);
+  assert.equal(study.sourceNodes[1].trainingNodeKey, null);
+  assert.equal("hands" in study.sourceNodes[1], false);
+  assert.equal(study.nodes.length, 1);
+});
+
+test("normaliza referências numéricas e paths de child nodes para a mesma identidade", () => {
+  assert.equal(normalizeHrcNodeReference(123), "123");
+  assert.equal(normalizeHrcNodeReference("123"), "123");
+  assert.equal(normalizeHrcNodeReference("nodes/123.json"), "123");
+  assert.equal(normalizeHrcNodeReference("nodes/missing.json"), "missing");
+});
+
+test("relatório contabiliza source, pré-flop, treináveis e cada descarte", async () => {
+  const postflop = { ...pushNode, street: 1 };
+  const structural = { player: -1, street: 0, children: 0, sequence: [], actions: [], hands: {} };
+  const unsupported = {
+    ...pushNode,
+    sequence: [{ player: 1, street: 0, type: "C", amount: 100 }],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 230 }],
+  };
+  const noEligible = {
+    ...pushNode,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 230 }],
+    hands: strategyHands([0.5, 0.5], [0, 1], 0),
+  };
+  const partiallyEligible = replaceHand(pushNode, "22", { weight: 0.005, played: [0, 1], evs: [0, 2.5] });
+  const study = await studyFromNodes([partiallyEligible, postflop, structural, unsupported, noEligible]);
+  const summary = summarizeHrcStudy(study);
+  assert.equal(summary.sourceNodeCount, 5);
+  assert.equal(summary.preflopNodeCount, 4);
+  assert.equal(summary.nodeCount, 1);
+  assert.equal(summary.storedHandClassCount, 169);
+  assert.equal(summary.eligibleTrainingHandClassCount, 168);
+  assert.deepEqual(summary.ignoredNodes, { POSTFLOP: 1, AUTOMATIC_X: 0, UNSUPPORTED_SEQUENCE: 1, NO_ELIGIBLE_HANDS: 1, NON_TRAINABLE: 1 });
+  assert.equal(summary.ignoredCount, 4);
+});
+
+test("preserva nodes estruturais de flop, turn e river com hands bucket-style", async () => {
+  const bucketHands = {
+    "bucket/made-hand": { combos: 24, strategy: { check: 0.35, bet: 0.65 } },
+    "bucket:draw": { combos: ["AsKs", "AhKh"], equity: 0.42 },
+  };
+  const postflopNodes = [
+    {
+      player: 0,
+      street: 1,
+      children: 2,
+      sequence: [
+        { player: 0, street: 0, type: "R", amount: 250 },
+        { player: 1, street: 0, type: "C", amount: 250 },
+      ],
+      actions: [
+        { type: "C", amount: 0, node: "nodes/2.json" },
+        { type: "R", amount: 300, node: 2 },
+      ],
+      hands: bucketHands,
+    },
+    {
+      player: 1,
+      street: 2,
+      children: 2,
+      sequence: [{ player: 0, street: 1, type: "C", amount: 0 }],
+      actions: [
+        { type: "C", amount: 0, node: "nodes/3.json" },
+        { type: "R", amount: 500, node: 3 },
+      ],
+      hands: bucketHands,
+    },
+    {
+      player: 0,
+      street: 3,
+      children: 1,
+      sequence: [{ player: 1, street: 2, type: "R", amount: 500 }],
+      actions: [{ type: "C", amount: 500, node: "nodes/missing.json" }],
+      hands: bucketHands,
+    },
+  ];
+  const entries: Record<string, string> = {
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(pushNode),
+  };
+  postflopNodes.forEach((node, index) => { entries[`nodes/${index + 1}.json`] = JSON.stringify(node); });
+
+  const pack = await parseHrcPack(zipFile(entries));
+  const parsedPostflop = pack.nodes.filter((node) => node.street > 0);
+  assert.equal(pack.nodes.length, 4);
+  assert.deepEqual(parsedPostflop.map((node) => node.street), [1, 2, 3]);
+  assert.ok(parsedPostflop.every((node) => Object.keys(node.hands).length === 0));
+  assert.ok(parsedPostflop.every((node) => node.eligibleHandCount === 0));
+
+  const study = toHrcStudyImport(pack);
+  const postflopSources = study.sourceNodes.filter((node) => node.street > 0);
+  assert.equal(postflopSources.length, 3);
+  assert.ok(postflopSources.every((node) => node.ignoredReason === "POSTFLOP"));
+  assert.ok(postflopSources.every((node) => node.trainingNodeKey === null));
+  assert.deepEqual(postflopSources.map((node) => node.actions[0].node), ["nodes/2.json", "nodes/3.json", "nodes/missing.json"]);
+  assert.equal(study.nodes.length, 1);
+  assert.equal(study.nodes[0].nodeKey, "0");
+  assert.equal(study.nodes.reduce((total, node) => total + node.hands.length, 0), 169);
+});
+
+test("mantém validação estrita de hands bucket-style em node pré-flop", async () => {
+  const bucketPreflop = {
+    ...pushNode,
+    hands: { "bucket/premium": { combos: 12, strategy: { fold: 0, shove: 1 } } },
+  };
+  const file = zipFile({
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(bucketPreflop),
+  });
+
+  await assert.rejects(parseHrcPack(file), /Classe de mão não canônica/);
+});
+
+test("aceita árvore HRC Pro sintética com 9.700 source nodes", async () => {
+  const structuralNode = JSON.stringify({ player: -1, street: 0, children: 0, sequence: [], actions: [], hands: {} });
+  const entries: Record<string, string> = {
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(pushNode),
+  };
+  for (let index = 1; index < 9_700; index++) entries[`nodes/${index}.json`] = structuralNode;
+  const pack = await parseHrcPack(zipFile(entries));
+  const study = toHrcStudyImport(pack, { releaseRawHands: true });
+  assert.equal(pack.nodes.length, 9_700);
+  assert.equal(study.sourceNodes.length, 9_700);
+  assert.equal(study.nodes.length, 1);
+  assert.equal(study.ignoredNodes.NON_TRAINABLE, 9_699);
+  assert.equal(Object.keys(pack.nodes[0].hands).length, 0, "o fluxo real pode liberar as mãos brutas após materializar as linhas persistíveis");
+});
+
+async function studyFromNodes(nodes: unknown[], customSettings: unknown = settings) {
+  const entries: Record<string, string> = { "settings.json": JSON.stringify(customSettings) };
+  nodes.forEach((node, index) => { entries[`nodes/${index}.json`] = JSON.stringify(node); });
+  return toHrcStudyImport(await parseHrcPack(zipFile(entries)));
+}
 
 function zipFile(entries: Record<string, string>, compressed = false) {
   const bytes = createZip(entries, compressed);
