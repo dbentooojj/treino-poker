@@ -7,16 +7,19 @@ import { nextReplayAttempt, TrainingReportView } from "../app/training-experienc
 import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import {
   buildTrainingPrompt,
+  deriveTrainingTableVisualState,
   sequenceActionLabel,
   trainingTableSeats,
 } from "../components/training/trainingPresentation";
 import { positionNames } from "../lib/hrc-import";
 import { buildProgressDashboard } from "../lib/progress";
-import type { TrainingAction, TrainingExercise } from "../lib/training";
+import { trainingPresentationModeFromView, trainingViewModeFromPresentation, type TrainingAction, type TrainingExercise } from "../lib/training";
 
 const fold: TrainingAction = { id: "fold", type: "FOLD" };
 const call: TrainingAction = { id: "call", type: "CALL" };
+const minRaise: TrainingAction = { id: "min-raise", type: "RAISE", amountBb: 4.4 };
 const threeBet: TrainingAction = { id: "three-bet", type: "RAISE", amountBb: 6.6 };
+const largeRaise: TrainingAction = { id: "large-raise", type: "RAISE", amountBb: 12 };
 const allIn: TrainingAction = { id: "all-in", type: "RAISE", amountBb: 20, label: "All-in" };
 
 test("a mesa usa as mesmas posições produzidas pelo importador HRC", () => {
@@ -45,17 +48,35 @@ test("pergunta e histórico derivam posição, ação e sizing da mesma sequênc
   assert.equal(sequenceActionLabel(reraised[1], 1, reraised), "3-bet 6.6 BB");
 });
 
-test("renderiza grades de 2, 3 e 4 ações sem assumir uma combinação fixa", () => {
+test("renderiza grades de 2 a 6 ações sem assumir uma combinação fixa", () => {
   const actionSets = [
     [fold, allIn],
     [fold, call, allIn],
     [fold, call, threeBet, allIn],
+    [fold, call, minRaise, threeBet, allIn],
+    [fold, call, minRaise, threeBet, largeRaise, allIn],
   ];
 
   for (const actions of actionSets) {
     const markup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, actions)} busy={false} onChoose={() => undefined}/>);
-    assert.match(markup, new RegExp(`play-action-buttons actions-${actions.length}`));
+    assert.match(markup, new RegExp(`play-action-buttons actions-${actions.length} is-active`));
+    assert.match(markup, new RegExp(`data-action-count="${actions.length}"`));
     assert.equal((markup.match(/<button/g) ?? []).length, actions.length);
+  }
+});
+
+test("mantém a ação anterior horizontal e afastada das bordas no mobile", async () => {
+  const exercise = makeExercise(8, [fold, call, minRaise, threeBet, largeRaise, allIn], "SB");
+  exercise.actionSequence = [{ position: "BTN", type: "RAISE", amountBb: 20, label: "All-in" }];
+  const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(markup, /data-position="BTN"[^>]*data-table-region="bottom"[\s\S]*?play-action-tag play-action-tag--all_in[^>]*>ALL-IN/);
+  assert.match(styles, /\.play-action-tag\s*\{[^}]*width:max-content;[^}]*white-space:nowrap;/);
+  assert.match(styles, /\.spot-poker-table \.play-seat\[data-table-region="right"\] \.play-action-tag\s*\{/);
+  assert.doesNotMatch(styles, /\.spot-poker-table \.play-action-tag\s*\{[^}]*overflow-wrap:anywhere;/);
+  for (const count of [2, 3, 4, 5, 6]) {
+    assert.match(styles, new RegExp(`\\.play-action-buttons\\.actions-${count}\\.is-active`));
   }
 });
 
@@ -67,13 +88,14 @@ test("all-in efetivo abaixo do stack nominal mantém texto e estado visual de al
   assert.match(decisionMarkup, /play-action-button--all_in/);
   assert.match(decisionMarkup, /<b>All-in 19 BB<\/b>/);
 
-  exercise.actionSequence = [{ position: "SB", type: "RAISE", amountBb: 19, label: "All-in" }];
-  const replayMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} replayFromStart onChoose={() => undefined}/>);
-  assert.match(replayMarkup, /play-action-tag--all_in/);
-  assert.match(replayMarkup, /all-in 19 BB/);
+  exercise.actionSequence = [{ position: "BB", type: "RAISE", amountBb: 19, label: "All-in" }];
+  const tableMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  assert.match(tableMarkup, /data-position="BB"[^>]*data-last-action="ALL_IN"/);
+  assert.match(tableMarkup, /play-action-tag--all_in[^>]*>ALL-IN/);
+  assert.match(tableMarkup, /aria-label="19 big blinds"/);
 });
 
-test("Desde o início reproduz actionSequence antes da mesma decisão", async () => {
+test("decisão rápida monta o spot imediatamente e o replay fica em um modo separado", async () => {
   const exercise = makeExercise(6, [fold, call], "BB");
   exercise.actionSequence = [
     { position: "UTG", type: "FOLD" },
@@ -81,29 +103,93 @@ test("Desde o início reproduz actionSequence antes da mesma decisão", async ()
     { position: "BTN", type: "RAISE", amountBb: 2.3 },
     { position: "SB", type: "FOLD" },
   ];
-  const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} replayFromStart onChoose={() => undefined}/>);
-  assert.match(markup, /DESDE O INÍCIO/);
-  assert.match(markup, /UTG fold/);
-  assert.match(markup, /play-seat--folded[^>]*data-position="UTG"/);
-  assert.doesNotMatch(markup, /play-action-buttons/);
+  const quickMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  assert.match(quickMarkup, /data-training-view-mode="quick-decision"/);
+  assert.match(quickMarkup, /data-position="UTG"[^>]*play-seat--folded|play-seat--folded[^>]*data-position="UTG"/);
+  assert.match(quickMarkup, /play-action-buttons/);
+  assert.doesNotMatch(quickMarkup, /DESDE O INÍCIO/);
+
+  const replayMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} viewMode="full-hand" onChoose={() => undefined}/>);
+  assert.match(replayMarkup, /data-training-view-mode="full-hand"/);
+  assert.match(replayMarkup, /DESDE O INÍCIO/);
+  assert.match(replayMarkup, /UTG fold/);
+  assert.doesNotMatch(replayMarkup, /play-action-buttons/);
   const [trainer, schema] = await Promise.all([
     readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(trainer, /presentationMode === "FROM_START"/);
-  assert.match(trainer, /replayFromStart=/);
+  assert.match(trainer, /trainingViewModeFromPresentation\(session\.config\.presentationMode\)/);
+  assert.match(trainer, /viewMode=\{viewMode\}/);
+  assert.doesNotMatch(trainer, /replayFromStart|Desde o início/);
   assert.match(schema, /presentationMode: trainingPresentationMode/);
   assert.doesNotMatch(schema, /training_type[^\n]*FROM_START/);
 });
 
-test("Repetir spot cria uma nova tentativa e reinicia o replay FROM_START", async () => {
-  assert.equal(nextReplayAttempt(0, "FROM_START"), 1);
-  assert.equal(nextReplayAttempt(1, "FROM_START"), 2);
-  assert.equal(nextReplayAttempt(0, "DECISION"), 0);
+test("os modos de UI preservam compatibilidade com o contrato persistido", async () => {
+  assert.equal(trainingViewModeFromPresentation("DECISION"), "quick-decision");
+  assert.equal(trainingViewModeFromPresentation("FROM_START"), "full-hand");
+  assert.equal(trainingPresentationModeFromView("quick-decision"), "DECISION");
+  assert.equal(trainingPresentationModeFromView("full-hand"), "FROM_START");
+  assert.equal(nextReplayAttempt(0, "full-hand"), 1);
+  assert.equal(nextReplayAttempt(1, "full-hand"), 2);
+  assert.equal(nextReplayAttempt(0, "quick-decision"), 0);
 
   const trainer = await readFile(new URL("../app/training-experience.tsx", import.meta.url), "utf8");
-  assert.match(trainer, /setReplayAttempt\(\(current\) => nextReplayAttempt\(current, session\.config\.presentationMode\)\)/);
-  assert.match(trainer, /key=\{`\$\{exercise\.trainingHandId\}:\$\{session\.config\.presentationMode \?\? "DECISION"\}:\$\{replayAttempt\}`\}/);
+  assert.match(trainer, /setReplayAttempt\(\(current\) => nextReplayAttempt\(current, viewMode\)\)/);
+  assert.match(trainer, /key=\{`\$\{exercise\.trainingHandId\}:\$\{viewMode\}:\$\{replayAttempt\}`\}/);
+  assert.doesNotMatch(trainer, /\{ id: "FROM_START", label: "Desde o início" \}/);
+});
+
+test("estado visual centralizado representa folds, cartas, ações, blinds e fichas do spot", () => {
+  const exercise = makeExercise(8, [fold, call], "SB");
+  exercise.heroStackBb = 20;
+  exercise.handClass = "K8s";
+  exercise.villainPosition = "BB";
+  exercise.actionSequence = [
+    { position: "UTG", type: "FOLD" },
+    { position: "UTG+1", type: "FOLD" },
+    { position: "MP", type: "FOLD" },
+    { position: "HJ", type: "FOLD" },
+    { position: "CO", type: "FOLD" },
+    { position: "BTN", type: "FOLD" },
+    { position: "BB", type: "RAISE", amountBb: 19, label: "All-in" },
+  ];
+
+  const tableState = deriveTrainingTableVisualState(exercise, "quick-decision", 0);
+  const bb = tableState.seats.find((seat) => seat.position === "BB")!;
+  const hero = tableState.seats.find((seat) => seat.position === "SB")!;
+  const utg = tableState.seats.find((seat) => seat.position === "UTG")!;
+  assert.equal(tableState.potBb, 19.5);
+  assert.deepEqual({ folded: utg.isFolded, cards: utg.hasCards, action: utg.lastAction }, { folded: true, cards: false, action: "FOLD" });
+  assert.deepEqual({ folded: bb.isFolded, cards: bb.hasCards, faceUp: bb.cardsFaceUp, committed: bb.committedBb, action: bb.lastAction }, { folded: false, cards: true, faceUp: false, committed: 19, action: "ALL_IN" });
+  assert.deepEqual({ hero: hero.isHero, faceUp: hero.cardsFaceUp, stack: hero.stackBb, committed: hero.committedBb, acting: hero.isActing }, { hero: true, faceUp: true, stack: 20, committed: .5, acting: true });
+
+  const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  assert.equal((markup.match(/play-action-tag--fold/g) ?? []).length, 6);
+  assert.equal((markup.match(/aria-label="Carta virada para baixo"/g) ?? []).length, 2);
+  assert.match(markup, /aria-label="19 big blinds"/);
+  assert.match(markup, /aria-label="0.5 big blinds"/);
+  assert.doesNotMatch(markup, /POTE/);
+  assert.doesNotMatch(markup, /Stack indisponível|play-card--dealt|DESDE O INÍCIO/);
+});
+
+test("call importado do HRC converte o valor bruto em fichas comprometidas", () => {
+  const exercise = makeExercise(6, [fold, call], "BB");
+  exercise.blinds = { smallBlind: 50, bigBlind: 100, ante: 0, anteType: "NONE" };
+  exercise.actionSequence = [
+    { position: "UTG", type: "RAISE", amountBb: 2.5 },
+    { position: "HJ", type: "CALL", metadata: { hrcAmount: 250 } },
+  ];
+  const tableState = deriveTrainingTableVisualState(exercise, "quick-decision");
+  const caller = tableState.seats.find((seat) => seat.position === "HJ")!;
+  assert.equal(caller.committedBb, 2.5);
+  assert.equal(caller.lastAction, "CALL");
+  assert.equal(tableState.potBb, 6.5);
+
+  const markup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
+  assert.match(markup, /data-position="HJ"[^>]*data-last-action="CALL"/);
+  assert.match(markup, /play-action-tag--call[^>]*>CALL/);
+  assert.match(markup, /aria-label="2.5 big blinds"/);
 });
 
 test("Visualizar distingue classes armazenadas das elegíveis para treino", async () => {
@@ -210,9 +296,12 @@ test("drill avança sem revelar a solução e concentra a análise no relatório
   const decisionMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} onChoose={() => undefined}/>);
   assert.match(decisionMarkup, /unified-training-table/);
   assert.match(decisionMarkup, /play-hole-cards/);
-  assert.match(decisionMarkup, /play-card--dealt/);
+  assert.match(decisionMarkup, /play-card--back/);
+  assert.doesNotMatch(decisionMarkup, /play-card--dealt/);
   assert.match(decisionMarkup, /play-action-panel play-action-panel--hero/);
-  assert.doesNotMatch(decisionMarkup, /play-chip-display|play-pot|play-bet-zone/);
+  assert.match(decisionMarkup, /play-chip-display/);
+  assert.doesNotMatch(decisionMarkup, /class="play-pot"/);
+  assert.match(decisionMarkup, /play-bet-zone/);
   assert.doesNotMatch(decisionMarkup, /rl-training-sidebar/);
   assert.doesNotMatch(decisionMarkup, /RESULTADO DO SPOT/);
   assert.doesNotMatch(decisionMarkup, /FREQUÊNCIA DO SOLVER/);

@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { PokerCard, Rank } from "../../lib/poker/cards";
-import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext } from "../../lib/training";
+import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext, type TrainingViewMode } from "../../lib/training";
 import { PlayingCard } from "../play/PlayingCard";
 import { UnifiedActionPanel } from "./UnifiedActionPanel";
 import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
 import { UnifiedResultPanel } from "./UnifiedResultPanel";
-import { buildTrainingPrompt, normalizeTrainingPosition, sequenceActionLabel, trainingTableSeats } from "./trainingPresentation";
+import { buildTrainingPrompt, deriveTrainingTableVisualState, normalizeTrainingPosition, sequenceActionLabel, visibleTrainingTableSeats } from "./trainingPresentation";
 
 export type SpotFeedback = {
   answer: AnswerEvaluation;
@@ -21,33 +21,50 @@ export function HeroHand({ handClass, compact = false, animate = false }: { hand
   </div>;
 }
 
-export function TrainingDecision({ exercise, busy, feedback, nextLabel = "Próximo spot", replayFromStart = false, onChoose, onRepeat, onNext }: {
+type TrainingDecisionProps = {
   exercise: TrainingExercise;
   busy: boolean;
   feedback?: SpotFeedback | null;
   nextLabel?: string;
-  replayFromStart?: boolean;
+  viewMode?: TrainingViewMode;
   onChoose: (action: TrainingAction) => void;
   onRepeat?: () => void;
   onNext?: () => void;
-}) {
-  const [sequenceStep, setSequenceStep] = useState(() => replayFromStart ? 0 : exercise.actionSequence.length);
+};
+
+export function TrainingDecision(props: TrainingDecisionProps) {
+  return props.viewMode === "full-hand"
+    ? <FullHandReplayDecision {...props}/>
+    : <TrainingDecisionContent {...props} viewMode="quick-decision" visibleActionCount={props.exercise.actionSequence.length}/>;
+}
+
+function FullHandReplayDecision(props: TrainingDecisionProps) {
+  const { exercise } = props;
+  const [sequenceStep, setSequenceStep] = useState(0);
   useEffect(() => {
-    if (!replayFromStart || sequenceStep >= exercise.actionSequence.length) return;
+    if (sequenceStep >= exercise.actionSequence.length) return;
     const timer = window.setTimeout(() => setSequenceStep((current) => Math.min(current + 1, exercise.actionSequence.length)), 650);
     return () => window.clearTimeout(timer);
-  }, [exercise.actionSequence.length, replayFromStart, sequenceStep]);
-  const replaying = replayFromStart && sequenceStep < exercise.actionSequence.length;
+  }, [exercise.actionSequence.length, sequenceStep]);
+  const replaying = sequenceStep < exercise.actionSequence.length;
   const nextSequenceAction = exercise.actionSequence[sequenceStep];
   const visibleActionCount = replaying ? sequenceStep + 1 : sequenceStep;
-  return <section className="spot-training-decision" aria-labelledby="training-question">
-    <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise} visibleActionCount={visibleActionCount}/></div>
-    {replaying ? <div className="spot-sequence-replay" role="status" aria-live="polite">
+  const replayStatus = replaying ? <div className="spot-sequence-replay" role="status" aria-live="polite">
       <span>DESDE O INÍCIO</span>
       <b>{nextSequenceAction?.position ?? `Ação ${sequenceStep + 1}`} {nextSequenceAction ? sequenceActionLabel(nextSequenceAction, sequenceStep, exercise.actionSequence) : ""}</b>
       <small>{sequenceStep + 1} de {exercise.actionSequence.length}</small>
-    </div> : feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>}
-  </section>;
+    </div> : null;
+  return <TrainingDecisionContent {...props} viewMode="full-hand" visibleActionCount={visibleActionCount} replayStatus={replayStatus}/>;
+}
+
+function TrainingDecisionContent({ exercise, busy, feedback, nextLabel = "Próximo spot", viewMode, visibleActionCount, replayStatus, onChoose, onRepeat, onNext }: TrainingDecisionProps & {
+  viewMode: TrainingViewMode;
+  visibleActionCount: number;
+  replayStatus?: React.ReactNode;
+}) {
+  return <section className="spot-training-decision" data-training-view-mode={viewMode} aria-labelledby="training-question">
+    <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise} viewMode={viewMode} visibleActionCount={visibleActionCount}/></div>
+    {replayStatus ?? (feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>)}</section>;
 }
 
 export function TrainingTablePreview({ context, loading = false }: { context: TrainingTableContext | null; loading?: boolean }) {
@@ -80,49 +97,40 @@ function previewTableSeats(context: TrainingTableContext) {
   return visibleTrainingTableSeats(context.playersCount, context.heroPosition);
 }
 
-function SpotPokerTable({ exercise, visibleActionCount = exercise.actionSequence.length }: { exercise: TrainingExercise; visibleActionCount?: number }) {
-  const actionHistory = new Map<string, TrainingSequenceAction>();
-  exercise.actionSequence.slice(0, visibleActionCount).forEach((action) => {
-    if (action.position) actionHistory.set(normalizeTrainingPosition(action.position), action);
-  });
-  const heroPosition = normalizeTrainingPosition(exercise.heroPosition);
-  const seats = visibleTrainingTableSeats(exercise.playersCount, exercise.heroPosition).map<UnifiedTableSeat>((seat) => {
-    const normalized = normalizeTrainingPosition(seat.position);
-    const hero = normalized === heroPosition;
-    const sequenceEntry = actionHistory.get(normalized);
-    const latestAction = exercise.actionSequence[visibleActionCount - 1];
-    const isLatestActor = latestAction?.position && normalizeTrainingPosition(latestAction.position) === normalized;
+function SpotPokerTable({ exercise, viewMode, visibleActionCount }: { exercise: TrainingExercise; viewMode: TrainingViewMode; visibleActionCount: number }) {
+  const tableState = deriveTrainingTableVisualState(exercise, viewMode, visibleActionCount);
+  const seats = tableState.seats.map<UnifiedTableSeat>((seat) => {
     return {
       position: seat.label,
       positionKey: seat.position,
-      stackBb: hero ? exercise.heroStackBb : undefined,
-      cards: hero ? handClassPokerCards(exercise.handClass) : [],
-      cardsVisible: hero,
-      visibleCards: hero ? 2 : 0,
-      hero,
-      active: visibleActionCount >= exercise.actionSequence.length ? hero : Boolean(isLatestActor),
-      folded: sequenceEntry?.type === "FOLD",
+      stackBb: seat.stackBb,
+      committedBb: seat.committedBb,
+      cards: seat.cardsFaceUp ? handClassPokerCards(exercise.handClass) : [],
+      cardsVisible: seat.cardsFaceUp,
+      visibleCards: seat.hasCards ? 2 : 0,
+      animateCards: viewMode === "full-hand",
+      hero: seat.isHero,
+      folded: seat.isFolded,
+      inHand: seat.isActiveInHand,
+      active: seat.isActing,
+      allIn: seat.lastAction === "ALL_IN",
       dealer: seat.dealer,
-      action: isLatestActor && latestAction ? {
-        label: sequenceActionLabel(latestAction, visibleActionCount - 1, exercise.actionSequence),
-        tone: latestAction.label?.toLowerCase().includes("all-in") ? "all_in" : latestAction.type.toLowerCase(),
-      } : undefined,
+      lastAction: seat.lastAction,
+      action: seat.lastAction ? { label: seat.lastAction.replace("_", "-"), tone: seat.lastAction.toLowerCase() } : undefined,
     };
   });
   return <UnifiedPokerTable
     seats={seats}
     anchorPosition={exercise.heroPosition}
     phase="PLAYING"
-    showChips={false}
-    showSeatDetails={false}
+    potBb={tableState.potBb}
+    showDeck={false}
+    showChips
+    showPot={viewMode === "full-hand"}
+    showSeatDetails
     className="spot-poker-table"
     ariaLabel={`Mesa do spot com ${exercise.playersCount} jogadores`}
   />;
-}
-
-function visibleTrainingTableSeats(playersCount: number, heroPosition: string) {
-  const seats = trainingTableSeats(playersCount, heroPosition);
-  return playersCount === 9 ? seats.filter((seat) => normalizeTrainingPosition(seat.position) !== "UTG+2") : seats;
 }
 
 function SpotActionPanel({ exercise, busy, onChoose }: { exercise: TrainingExercise; busy: boolean; onChoose: (action: TrainingAction) => void }) {

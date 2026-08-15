@@ -1,10 +1,30 @@
-import { formatBb, type TrainingExercise, type TrainingSequenceAction } from "../../lib/training";
+import { formatBb, type TrainingExercise, type TrainingSequenceAction, type TrainingViewMode } from "../../lib/training";
 
 export type TrainingTableSeat = {
   position: string;
   label: string;
   placement: string;
   dealer: boolean;
+};
+
+export type TrainingSeatLastAction = "FOLD" | "CALL" | "CHECK" | "BET" | "RAISE" | "ALL_IN";
+
+export type TrainingSeatVisualState = TrainingTableSeat & {
+  isHero: boolean;
+  isFolded: boolean;
+  isActiveInHand: boolean;
+  hasCards: boolean;
+  cardsFaceUp: boolean;
+  stackBb?: number;
+  committedBb: number;
+  lastAction?: TrainingSeatLastAction;
+  isActing: boolean;
+};
+
+export type TrainingTableVisualState = {
+  mode: TrainingViewMode;
+  seats: TrainingSeatVisualState[];
+  potBb: number;
 };
 
 const TABLE_POSITIONS: Record<number, string[]> = {
@@ -37,6 +57,101 @@ export function trainingTableSeats(playersCount: number, heroPosition: string): 
       dealer: count === 2 ? normalized === "SB" : normalized === "BTN",
     };
   });
+}
+
+export function visibleTrainingTableSeats(playersCount: number, heroPosition: string) {
+  const seats = trainingTableSeats(playersCount, heroPosition);
+  return playersCount === 9 ? seats.filter((seat) => normalizeTrainingPosition(seat.position) !== "UTG+2") : seats;
+}
+
+export function deriveTrainingTableVisualState(
+  exercise: TrainingExercise,
+  mode: TrainingViewMode,
+  visibleActionCount = exercise.actionSequence.length,
+): TrainingTableVisualState {
+  const allSeats = trainingTableSeats(exercise.playersCount, exercise.heroPosition);
+  const heroPosition = normalizeTrainingPosition(exercise.heroPosition);
+  const bigBlind = exercise.blinds.bigBlind > 0 ? exercise.blinds.bigBlind : 1;
+  const liveContributions = new Map(allSeats.map((seat) => [normalizeTrainingPosition(seat.position), 0]));
+  const deadContributions = new Map(allSeats.map((seat) => [normalizeTrainingPosition(seat.position), 0]));
+  const folded = new Set<string>();
+  const lastActions = new Map<string, TrainingSeatLastAction>();
+  const actionCount = mode === "quick-decision" ? exercise.actionSequence.length : visibleActionCount;
+  const visibleSequence = exercise.actionSequence.slice(0, Math.max(0, Math.min(actionCount, exercise.actionSequence.length)));
+
+  setContribution(liveContributions, "SB", exercise.blinds.smallBlind / bigBlind);
+  setContribution(liveContributions, "BB", 1);
+  const anteBb = Math.max(0, exercise.blinds.ante / bigBlind);
+  if (anteBb > 0) {
+    const anteType = exercise.blinds.anteType.toUpperCase();
+    if (anteType.includes("BB")) setContribution(deadContributions, "BB", anteBb);
+    else for (const seat of allSeats) setContribution(deadContributions, seat.position, anteBb);
+  }
+
+  visibleSequence.forEach((action) => {
+    if (!action.position) return;
+    const position = normalizeTrainingPosition(action.position);
+    if (!liveContributions.has(position) || folded.has(position)) return;
+    const committed = liveContributions.get(position) ?? 0;
+
+    if (action.type === "FOLD") {
+      folded.add(position);
+      lastActions.set(position, "FOLD");
+      return;
+    }
+    if (action.type === "CHECK") {
+      lastActions.set(position, "CHECK");
+      return;
+    }
+    if (action.type === "CALL") {
+      const rawHrcAmount = finiteNumber(action.metadata?.hrcAmount);
+      const callTarget = rawHrcAmount === undefined
+        ? typeof action.amountBb === "number"
+          ? Math.max(committed, action.amountBb)
+          : Math.max(...liveContributions.values())
+        : committed + Math.max(0, rawHrcAmount / bigBlind);
+      liveContributions.set(position, roundBb(callTarget));
+      lastActions.set(position, "CALL");
+      return;
+    }
+
+    if (typeof action.amountBb === "number") {
+      liveContributions.set(position, roundBb(Math.max(committed, action.amountBb)));
+    }
+    lastActions.set(position, action.label?.toLowerCase().includes("all-in")
+      ? "ALL_IN"
+      : action.type === "BET" ? "BET" : "RAISE");
+  });
+
+  const latestActor = visibleSequence.at(-1)?.position
+    ? normalizeTrainingPosition(visibleSequence.at(-1)!.position!)
+    : null;
+  const sequenceComplete = visibleSequence.length >= exercise.actionSequence.length;
+  const seats = visibleTrainingTableSeats(exercise.playersCount, exercise.heroPosition).map<TrainingSeatVisualState>((seat) => {
+    const position = normalizeTrainingPosition(seat.position);
+    const isHero = position === heroPosition;
+    const isFolded = folded.has(position);
+    return {
+      ...seat,
+      isHero,
+      isFolded,
+      isActiveInHand: !isFolded,
+      hasCards: !isFolded,
+      cardsFaceUp: isHero && !isFolded,
+      // The current exercise payload only exposes Hero's stack. Villain stacks
+      // stay absent instead of being inferred from the effective stack.
+      ...(isHero ? { stackBb: exercise.heroStackBb } : {}),
+      committedBb: roundBb((liveContributions.get(position) ?? 0) + (deadContributions.get(position) ?? 0)),
+      lastAction: lastActions.get(position),
+      isActing: sequenceComplete ? isHero : latestActor === position,
+    };
+  });
+  const potBb = roundBb(
+    [...liveContributions.values()].reduce((total, amount) => total + amount, 0)
+    + [...deadContributions.values()].reduce((total, amount) => total + amount, 0),
+  );
+
+  return { mode, seats, potBb };
 }
 
 export function displayTrainingPosition(position: string, playersCount: number) {
@@ -103,4 +218,17 @@ function positionClass(position: string) {
   if (/^MP[1-7]?$/.test(position)) return "mp";
   if (/^P(?:[1-9]|10)$/.test(position)) return position.toLowerCase();
   return position.toLowerCase().replace("+", "-").replace(/[^a-z0-9-]/g, "");
+}
+
+function setContribution(contributions: Map<string, number>, position: string, amount: number) {
+  const normalized = normalizeTrainingPosition(position);
+  if (contributions.has(normalized)) contributions.set(normalized, roundBb(Math.max(0, amount)));
+}
+
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function roundBb(value: number) {
+  return Math.round(value * 1_000) / 1_000;
 }

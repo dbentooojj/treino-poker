@@ -14,13 +14,16 @@ export type UnifiedTableSeat = {
   cards?: PokerCard[];
   cardsVisible?: boolean;
   visibleCards?: number;
+  animateCards?: boolean;
   hero?: boolean;
   folded?: boolean;
+  inHand?: boolean;
   allIn?: boolean;
   active?: boolean;
   winner?: boolean;
   dealer?: boolean;
   mucking?: boolean;
+  lastAction?: string;
   action?: { label: string; tone: string };
 };
 
@@ -34,13 +37,14 @@ export type UnifiedPokerTableProps = {
   collecting?: boolean;
   showDeck?: boolean;
   showChips?: boolean;
+  showPot?: boolean;
   showSeatDetails?: boolean;
   payout?: { label: string; amountBb: number } | null;
   className?: string;
   ariaLabel?: string;
 };
 
-export function UnifiedPokerTable({ seats, anchorPosition, phase, potBb = 0, board = [], muckCount = 0, collecting = false, showDeck = true, showChips = true, showSeatDetails = true, payout, className = "", ariaLabel = "Mesa de treinamento" }: UnifiedPokerTableProps) {
+export function UnifiedPokerTable({ seats, anchorPosition, phase, potBb = 0, board = [], muckCount = 0, collecting = false, showDeck = true, showChips = true, showPot = true, showSeatDetails = true, payout, className = "", ariaLabel = "Mesa de treinamento" }: UnifiedPokerTableProps) {
   const orderedSeats = rotateSeatsToAnchor(seats, anchorPosition);
   const coordinates = tableSeatCoordinates(orderedSeats.length);
   return <div className={`play-table-frame unified-training-table play-phase-${phase.toLowerCase()} ${className}`} data-seat-count={orderedSeats.length} role="group" aria-label={ariaLabel}>
@@ -51,7 +55,7 @@ export function UnifiedPokerTable({ seats, anchorPosition, phase, potBb = 0, boa
         <div className="play-muck" role="img" aria-label={`${muckCount} folds no muck`}>
           {Array.from({ length: Math.min(muckCount, 7) }, (_, index) => <i style={{ "--muck-index": index } as React.CSSProperties} key={index}/>) }
         </div>
-        {showChips && <PotDisplay amountBb={potBb}/>}
+        {showChips && showPot && <PotDisplay amountBb={potBb}/>}
         <CommunityBoard cards={board}/>
         {showChips && payout && <div className="play-pot-payout"><span>{payout.label}</span><b>+{formatBb(payout.amountBb)} BB</b></div>}
         {orderedSeats.map((seat, index) => <UnifiedPokerSeat key={seat.positionKey ?? seat.position} seat={seat} slot={index + 1} coordinate={coordinates[index]} showDetails={showSeatDetails}/>)}
@@ -59,7 +63,7 @@ export function UnifiedPokerTable({ seats, anchorPosition, phase, potBb = 0, boa
           const coordinate = coordinates[index];
           const betCoordinate = inwardCoordinate(coordinate);
           const style = { "--table-bet-x": `${betCoordinate[0]}%`, "--table-bet-y": `${betCoordinate[1]}%` } as React.CSSProperties;
-          return <div style={style} className={`play-bet-zone play-bet-zone-${index + 1} ${collecting && (seat.committedBb ?? 0) > 0 ? "play-bet-zone--collecting" : ""}`} key={seat.positionKey ?? seat.position}>
+          return <div style={style} data-table-region={tableSeatRegion(coordinate)} className={`play-bet-zone play-bet-zone-${index + 1} ${collecting && (seat.committedBb ?? 0) > 0 ? "play-bet-zone--collecting" : ""}`} key={seat.positionKey ?? seat.position}>
             <ChipStack amountBb={seat.committedBb ?? 0}/>
           </div>;
         })}
@@ -72,15 +76,19 @@ function UnifiedPokerSeat({ seat, slot, coordinate, showDetails }: { seat: Unifi
   const showCards = !seat.folded || seat.mucking;
   const cards = seat.cards ?? [];
   const visibleCards = seat.visibleCards ?? cards.length;
+  const cardCount = seat.cardsVisible ? Math.min(cards.length, visibleCards) : visibleCards;
   const style = { "--table-seat-x": `${coordinate[0]}%`, "--table-seat-y": `${coordinate[1]}%` } as React.CSSProperties;
-  return <div style={style} className={`play-seat play-seat-${slot} ${seat.hero ? "play-seat--hero" : ""} ${seat.active ? "play-seat--active" : ""} ${seat.winner ? "play-seat--winner" : ""} ${seat.folded && !seat.mucking ? "play-seat--folded" : ""} ${seat.mucking ? "play-seat--mucking" : ""}`} data-position={seat.position} data-hero={seat.hero || undefined}>
+  return <div style={style} className={`play-seat play-seat-${slot} ${seat.hero ? "play-seat--hero" : ""} ${seat.active ? "play-seat--active" : ""} ${seat.winner ? "play-seat--winner" : ""} ${seat.folded && !seat.mucking ? "play-seat--folded" : ""} ${seat.mucking ? "play-seat--mucking" : ""}`} data-position={seat.position} data-hero={seat.hero || undefined} data-active-in-hand={seat.inHand} data-last-action={seat.lastAction} data-committed-bb={seat.committedBb} data-table-region={tableSeatRegion(coordinate)}>
     <div className="play-hole-cards" role="group" aria-label={`Cartas de ${seat.hero ? `${seat.position}, Hero` : seat.position}`}>
-      {showCards && cards.slice(0, visibleCards).map((card, cardIndex) => <PlayingCard key={`${card.rank}${card.suit}-${cardIndex}`} card={card} compact faceDown={!seat.cardsVisible} animate/>)}
+      {showCards && Array.from({ length: cardCount }, (_, cardIndex) => {
+        const card = cards[cardIndex] ?? FACE_DOWN_CARD;
+        return <PlayingCard key={`${card.rank}${card.suit}-${cardIndex}`} card={card} compact faceDown={!seat.cardsVisible} animate={seat.animateCards !== false}/>;
+      })}
     </div>
     <div className="play-player-box">
       {seat.dealer && <i className="play-dealer" aria-label="Dealer">D</i>}
       <strong>{seat.position}{seat.hero && <small>VOCÊ</small>}</strong>
-      {showDetails && <span>{seat.detail ?? (seat.stackBb === undefined ? "Stack indisponível" : `${formatBb(seat.stackBb)} BB${seat.allIn ? " · ALL-IN" : ""}`)}</span>}
+      {showDetails && (seat.detail || seat.stackBb !== undefined) && <span>{seat.detail ?? `${formatBb(seat.stackBb!)} BB${seat.allIn ? " · ALL-IN" : ""}`}</span>}
     </div>
     {seat.action && <div className={`play-action-tag play-action-tag--${seat.action.tone}`}>{seat.action.label}</div>}
   </div>;
@@ -109,6 +117,16 @@ export function tableSeatCoordinates(playersCount: number): Array<[number, numbe
 
 function inwardCoordinate([x, y]: [number, number]): [number, number] {
   return [50 + (x - 50) * .7, 50 + (y - 50) * .62];
+}
+
+const FACE_DOWN_CARD: PokerCard = { rank: "2", suit: "s" };
+
+function tableSeatRegion([x, y]: [number, number]) {
+  if (y <= 20) return "top";
+  if (y >= 80) return "bottom";
+  if (x <= 20) return "left";
+  if (x >= 80) return "right";
+  return "center";
 }
 
 function normalizePosition(position: string) {

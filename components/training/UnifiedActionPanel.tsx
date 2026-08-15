@@ -23,7 +23,11 @@ export function UnifiedActionPanel({ eyebrow, title, context, actions, active = 
       <strong id={titleId}>{title}</strong>
       <small>{context}</small>
     </div>
-    <div className={`play-action-buttons actions-${actions.length}`} aria-label={active ? "Escolha sua ação" : undefined}>
+    <div
+      className={`play-action-buttons actions-${actions.length} ${active ? "is-active" : "is-waiting"}`}
+      data-action-count={actions.length}
+      aria-label={active ? "Escolha sua ação" : undefined}
+    >
       {active ? actions.map((action) => <button type="button" key={action.id} disabled={busy || action.disabled} className={`play-action-button play-action-button--${action.tone}`} onClick={() => onAction(action.id)}>
         <b>{action.label}</b>
         {action.hint && <small>{action.hint}</small>}

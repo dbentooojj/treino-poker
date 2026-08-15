@@ -1,5 +1,6 @@
 export const TRAINING_TYPES = ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET", "VS_4_BET"] as const;
 export const TRAINING_PRESENTATION_MODES = ["DECISION", "FROM_START"] as const;
+export const TRAINING_VIEW_MODES = ["quick-decision", "full-hand"] as const;
 export const EQUITY_MODELS = ["CHIP_EV", "ICM"] as const;
 export const EV_UNITS = ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"] as const;
 export const QUESTION_COUNTS = [20, 50, 100] as const;
@@ -8,6 +9,7 @@ export const MAX_EXERCISE_QUEUE_SIZE = 100;
 
 export type TrainingType = (typeof TRAINING_TYPES)[number];
 export type TrainingPresentationMode = (typeof TRAINING_PRESENTATION_MODES)[number];
+export type TrainingViewMode = (typeof TRAINING_VIEW_MODES)[number];
 export type EquityModel = (typeof EQUITY_MODELS)[number];
 export type EvUnit = (typeof EV_UNITS)[number];
 export type TrainingActionType = "FOLD" | "CHECK" | "CALL" | "BET" | "RAISE";
@@ -22,7 +24,6 @@ export type TrainingAction = {
 };
 
 export type TrainingSequenceAction = TrainingAction & { position?: string };
-export type TrainingMode = "DECISION" | "FULL_HAND";
 export type TrainingStreet = "PREFLOP" | "FLOP" | "TURN" | "RIVER";
 export type TrainingGameType = "TOURNAMENT";
 
@@ -40,6 +41,16 @@ export type TrainingConfig = Required<Pick<TrainingFilters, "equityModel">> & {
   targetQuestions: number | null;
   presentationMode?: TrainingPresentationMode;
 };
+
+// PresentationMode remains the persisted/API contract. ViewMode is the UI concept
+// that keeps an assembled decision spot separate from a future full-hand replay.
+export function trainingViewModeFromPresentation(mode?: TrainingPresentationMode): TrainingViewMode {
+  return mode === "FROM_START" ? "full-hand" : "quick-decision";
+}
+
+export function trainingPresentationModeFromView(mode: TrainingViewMode): TrainingPresentationMode {
+  return mode === "full-hand" ? "FROM_START" : "DECISION";
+}
 
 export type BlindStructure = {
   smallBlind: number;
