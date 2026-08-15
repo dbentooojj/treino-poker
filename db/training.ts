@@ -5,6 +5,7 @@ import {
   MAX_EXERCISE_QUEUE_SIZE,
   actionAliases,
   actionKey,
+  classifyTrainingChoice,
   resolvedActionLabel,
   evaluateChoice,
   fisherYates,
@@ -28,6 +29,14 @@ import {
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
 import { trainingAnswers, trainingHands, trainingNodes, trainingSessions, trainingSets } from "./schema";
+import {
+  continueFullHand,
+  dealFullHand,
+  getFullHandStudy,
+  getPublishedFullHandStages,
+  selectPublishedFullHandStudy,
+  type FullHandState,
+} from "./full-hand";
 
 const PUBLISHED_CONDITIONS: SQL[] = [
   eq(trainingSets.gameType, "TOURNAMENT"),
@@ -36,6 +45,7 @@ const PUBLISHED_CONDITIONS: SQL[] = [
   eq(trainingSets.isPublished, true),
 ];
 const MAX_REPORT_ANSWER_DETAILS = 1_000;
+const DECISION_NODE_CONDITION = eq(trainingNodes.decisionEligible, true);
 type TrainingQueryFilters = Omit<TrainingFilters, "trainingType"> & { trainingType?: TrainingType | null };
 
 export type SessionStartRequest =
@@ -55,6 +65,7 @@ export class NoReviewErrorsError extends Error {}
 export class TrainingSessionStateError extends Error {}
 
 export async function getTrainingOptions(filters: TrainingFilters): Promise<TrainingOptions> {
+  const fullHandStages = await getPublishedFullHandStages();
   const trainingTypes = await distinct<TrainingType>(trainingNodes.trainingType, filters, []);
   const equityModels = await distinct<EquityModel>(trainingSets.equityModel, filters, ["trainingType"]);
   const stackDepthsBb = await distinct<number>(trainingNodes.heroStackBb, filters, ["trainingType", "equityModel"]);
@@ -71,7 +82,7 @@ export async function getTrainingOptions(filters: TrainingFilters): Promise<Trai
   }).from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
     .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
-    .where(and(...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
+    .where(and(DECISION_NODE_CONDITION, ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
     .orderBy(asc(trainingSets.displayOrder), asc(trainingSets.importedAt), asc(trainingSets.id), asc(trainingNodes.id), asc(trainingHands.id))
     .limit(1);
   return {
@@ -84,10 +95,18 @@ export async function getTrainingOptions(filters: TrainingFilters): Promise<Trai
       ...match,
       actionSequence: match.actionSequence as TrainingSequenceAction[],
     } : null,
+    fullHandStages,
   };
 }
 
 export async function createTrainingSession(userId: string, request: SessionStartRequest): Promise<TrainingSession> {
+  if (request.mode === "REPEAT") {
+    const source = await ownedSession(userId, request.sourceSessionId);
+    if (source?.fullHandState) return createFullHandTrainingSession(userId, sessionConfig(source), source.id);
+  }
+  if (request.mode !== "REPEAT" && request.mode !== "REVIEW_ERRORS" && "config" in request && request.config.presentationMode === "FROM_START") {
+    return createFullHandTrainingSession(userId, request.config);
+  }
   let config: TrainingConfig;
   let entries: QueueEntry[];
   let previousQueue: QueueEntry[] | undefined;
@@ -101,6 +120,7 @@ export async function createTrainingSession(userId: string, request: SessionStar
     config = sessionConfig(source);
     previousQueue = source.exerciseQueue;
     if (request.mode === "REVIEW_ERRORS") {
+      if (source.fullHandState) config = { ...config, presentationMode: "DECISION", fullHandStage: undefined };
       if (!source.answerDetailsAvailable) throw new NoReviewErrorsError("Os detalhes por mão deste resumo histórico não estão disponíveis para revisão.");
       const selectedSetId = config.trainingType === null ? undefined : source.trainingSetId ?? await getReviewSetId(source.id);
       selectedSet = selectedSetId ? await getTrainingSetContext(selectedSetId) : null;
@@ -152,13 +172,14 @@ export async function createTrainingSession(userId: string, request: SessionStar
     }
     throw error;
   }
-  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
+  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, completedHands: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
 }
 
 export async function answerTrainingSession(userId: string, input: AnswerTrainingInput) {
   const recorded = await recordedAnswerResponse(userId, input);
   if (recorded) return recorded;
   const session = await ownedSession(userId, input.sessionId);
+  if (session?.presentationMode === "FROM_START" && session.fullHandState && !session.endedAt) return answerFullHandTrainingSession(userId, input, session);
   if (!session || session.endedAt) throw new TrainingSessionStateError("Sessão encerrada ou não encontrada.");
   if (input.questionIndex !== session.answeredQuestions) throw new TrainingSessionStateError("Esta resposta não corresponde ao índice atual da sessão.");
   const entry = session.exerciseQueue[session.queuePosition];
@@ -243,10 +264,183 @@ export async function answerTrainingSession(userId: string, input: AnswerTrainin
     decisionClarity: exerciseData.decisionClarity,
     isMixed: Boolean(exerciseData.isMixed),
   };
-  if (completed) return { answer, nodeRange, answeredQuestions, correctAnswers, report: await getTrainingReport(userId, session.id), nextExercise: null, replayed: false };
+  if (completed) return { answer, nodeRange, answeredQuestions, correctAnswers, completedHands: session.completedHands, report: await getTrainingReport(userId, session.id), nextExercise: null, replayed: false };
   const nextExercise = await getExercise(nextQueue[nextPosition]);
   if (!nextExercise) throw new TrainingSessionStateError("Próximo exercício não encontrado.");
-  return { answer, nodeRange, answeredQuestions, correctAnswers, report: null, nextExercise, replayed: false };
+  return { answer, nodeRange, answeredQuestions, correctAnswers, completedHands: session.completedHands, report: null, nextExercise, replayed: false };
+}
+
+async function createFullHandTrainingSession(userId: string, requestedConfig: TrainingConfig, sourceSessionId: string | null = null): Promise<TrainingSession> {
+  const stage = requestedConfig.fullHandStage ?? "PREFLOP";
+  const study = await selectPublishedFullHandStudy(stage, requestedConfig.equityModel)
+    ?? await selectPublishedFullHandStudy(stage);
+  if (!study) throw new NoExercisesError("Nenhum estudo de mão completa disponível.");
+  const dealt = await dealFullHand(study);
+  if (!dealt.entry) throw new NoExercisesError("O estudo não produziu uma decisão treinável para o Hero.");
+  const exercise = await getExercise(dealt.entry);
+  if (!exercise) throw new NoExercisesError("A decisão inicial da mão não está disponível.");
+  const config: TrainingConfig = {
+    trainingType: null,
+    equityModel: study.equityModel,
+    targetQuestions: requestedConfig.targetQuestions,
+    presentationMode: "FROM_START",
+    fullHandStage: stage,
+  };
+  const id = crypto.randomUUID();
+  const startedAt = new Date();
+  try {
+    await getDb().insert(trainingSessions).values({
+      id,
+      userId,
+      trainingSetId: study.id,
+      trainingType: null,
+      presentationMode: "FROM_START",
+      equityModel: study.equityModel,
+      playersCount: study.playersCount,
+      stackBb: exercise.heroStackBb,
+      heroPosition: exercise.heroPosition,
+      targetQuestions: config.targetQuestions,
+      exerciseQueue: [dealt.entry],
+      queuePosition: 0,
+      fullHandState: dealt.state,
+      sourceSessionId,
+      startedAt,
+    });
+  } catch (error) {
+    if (hasPostgresErrorCode(error, "23505")) {
+      const active = await getActiveTrainingSession(userId);
+      if (active && sameConfig(active.config, config)) return active;
+      throw new TrainingSessionStateError("Finalize ou retome a sessão ativa antes de iniciar outra.");
+    }
+    throw error;
+  }
+  return {
+    id,
+    startedAt: startedAt.getTime(),
+    config,
+    targetQuestions: config.targetQuestions,
+    answeredQuestions: 0,
+    correctAnswers: 0,
+    completedHands: 0,
+    evDelta: 0,
+    evUnit: exercise.evUnit,
+    exercise,
+  };
+}
+
+async function answerFullHandTrainingSession(
+  userId: string,
+  input: AnswerTrainingInput,
+  session: typeof trainingSessions.$inferSelect,
+) {
+  if (input.questionIndex !== session.answeredQuestions) throw new TrainingSessionStateError("Esta resposta não corresponde à decisão atual.");
+  const entry = session.exerciseQueue[session.queuePosition];
+  if (!entry || entry.trainingNodeId !== input.trainingNodeId || entry.trainingHandId !== input.trainingHandId) {
+    throw new TrainingSessionStateError("Esta não é a decisão atual da mão.");
+  }
+  if (!session.trainingSetId || !session.fullHandState) throw new TrainingSessionStateError("O estado da mão completa não está disponível.");
+  const study = await getFullHandStudy(session.trainingSetId);
+  if (!study) throw new TrainingSessionStateError("O estudo de mão completa não está mais publicado.");
+  const exerciseData = await getExerciseData(entry);
+  if (!exerciseData) throw new TrainingSessionStateError("Decisão do Hero não encontrada.");
+  const availableActions = exerciseData.availableActions as TrainingAction[];
+  const actionIndex = availableActions.findIndex((action) => actionAliases(action).includes(input.selectedAction));
+  if (actionIndex < 0) throw new TrainingSessionStateError("Ação indisponível nesta decisão.");
+  const evaluation = evaluateChoice(input.selectedAction, availableActions, exerciseData.bestAction, exerciseData.evs, exerciseData.strategy);
+  const nodeRange = await getNodeRange(entry);
+  if (!evaluation || !nodeRange) throw new TrainingSessionStateError("Estratégia da decisão não encontrada.");
+
+  let nextAdvance = await continueFullHand(study, session.fullHandState as FullHandState, actionIndex);
+  const answeredQuestions = session.answeredQuestions + 1;
+  const correctAnswers = session.correctAnswers + (evaluation.correct ? 1 : 0);
+  const completedHands = session.completedHands + (nextAdvance.terminal ? 1 : 0);
+  const completed = session.targetQuestions !== null && completedHands >= session.targetQuestions;
+  if (nextAdvance.terminal && !completed) nextAdvance = await dealFullHand(study);
+  if (!completed && !nextAdvance.entry) throw new TrainingSessionStateError("A próxima decisão do Hero não foi encontrada.");
+  const durationSeconds = elapsedSeconds(session.startedAt);
+  const nextQueue = completed ? session.exerciseQueue : [nextAdvance.entry!];
+  const nextPosition = completed ? nextQueue.length : 0;
+
+  try {
+    await getDb().transaction(async (tx) => {
+      await tx.insert(trainingAnswers).values({
+        id: crypto.randomUUID(),
+        trainingSessionId: session.id,
+        trainingSetId: entry.trainingSetId,
+        trainingNodeId: entry.trainingNodeId,
+        trainingHandId: entry.trainingHandId,
+        questionIndex: input.questionIndex,
+        handClass: exerciseData.handClass,
+        heroPosition: exerciseData.heroPosition,
+        stackBb: exerciseData.heroStackBb,
+        evUnit: exerciseData.evUnit,
+        selectedAction: evaluation.selected,
+        bestAction: evaluation.bestKey,
+        isCorrect: evaluation.correct,
+        strategy: exerciseData.strategy,
+        evs: exerciseData.evs,
+        decisionClarity: exerciseData.decisionClarity,
+        isMixed: exerciseData.isMixed,
+      });
+      const [updated] = await tx.update(trainingSessions).set({
+        answeredQuestions,
+        correctAnswers,
+        completedHands,
+        durationSeconds,
+        exerciseQueue: nextQueue,
+        queuePosition: nextPosition,
+        fullHandState: nextAdvance.state,
+        ...(completed ? { endedAt: new Date(), completionReason: "COMPLETED" as const } : {}),
+      }).where(and(
+        eq(trainingSessions.id, session.id),
+        eq(trainingSessions.userId, userId),
+        eq(trainingSessions.answeredQuestions, session.answeredQuestions),
+        isNull(trainingSessions.endedAt),
+      )).returning({ id: trainingSessions.id });
+      if (!updated) throw new TrainingSessionStateError("A decisão já foi registrada.");
+    });
+  } catch (error) {
+    if (hasPostgresErrorCode(error, "23505")) {
+      const replay = await recordedAnswerResponse(userId, input);
+      if (replay) return replay;
+    }
+    throw error;
+  }
+
+  const answer: AnswerEvaluation = {
+    correct: evaluation.correct,
+    selectedKey: evaluation.selectedKey,
+    bestKey: evaluation.bestKey,
+    bestLabel: evaluation.bestLabel,
+    strategy: exerciseData.strategy,
+    evs: exerciseData.evs,
+    decisionClarity: exerciseData.decisionClarity,
+    isMixed: Boolean(exerciseData.isMixed),
+  };
+  if (completed) {
+    return {
+      answer,
+      nodeRange,
+      answeredQuestions,
+      correctAnswers,
+      completedHands,
+      report: await getTrainingReport(userId, session.id),
+      nextExercise: null,
+      replayed: false,
+    };
+  }
+  const nextExercise = await getExercise(nextAdvance.entry!);
+  if (!nextExercise) throw new TrainingSessionStateError("A próxima decisão não está disponível.");
+  return {
+    answer,
+    nodeRange,
+    answeredQuestions,
+    correctAnswers,
+    completedHands,
+    report: null,
+    nextExercise,
+    replayed: false,
+  };
 }
 
 export async function getActiveTrainingSession(userId: string, sessionId?: string): Promise<TrainingSession | null> {
@@ -269,6 +463,7 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
     targetQuestions: session.targetQuestions,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    completedHands: session.completedHands,
     evDelta: evMetric.value,
     evUnit: evMetric.unit,
     exercise,
@@ -352,7 +547,7 @@ async function selectEligibleTrainingSet(filters: TrainingQueryFilters) {
     .from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
     .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
-    .where(and(...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
+    .where(and(DECISION_NODE_CONDITION, ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()))
     .orderBy(asc(trainingSets.displayOrder), asc(trainingSets.importedAt), asc(trainingSets.id))
     .limit(1);
   return row ?? null;
@@ -366,7 +561,7 @@ async function getTrainingSetContext(trainingSetId: string) {
 
 async function getEligibleEntries(filters: TrainingQueryFilters, trainingSetId?: string): Promise<QueueEntry[]> {
   const pivot = crypto.randomUUID();
-  const baseConditions = [...(trainingSetId ? [eq(trainingSets.id, trainingSetId)] : []), ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
+  const baseConditions = [...(trainingSetId ? [eq(trainingSets.id, trainingSetId)] : []), DECISION_NODE_CONDITION, ...conditions(filters, ["trainingType", "equityModel", "stackDepthBb", "heroPosition"]), eligibleHandCondition()];
   const queryWindow = (boundary: SQL, limit: number) => getDb().select({
       trainingSetId: trainingSets.id,
       trainingNodeId: trainingNodes.id,
@@ -549,6 +744,7 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
       nodeRange,
       answeredQuestions: session.answeredQuestions,
       correctAnswers: session.correctAnswers,
+      completedHands: session.completedHands,
       report: await getTrainingReport(userId, session.id),
       nextExercise: null,
       replayed: true,
@@ -562,6 +758,7 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
     nodeRange,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    completedHands: session.completedHands,
     report: null,
     nextExercise,
     replayed: true,
@@ -572,6 +769,7 @@ function sessionConfig(session: typeof trainingSessions.$inferSelect): TrainingC
   return {
     trainingType: session.trainingType,
     presentationMode: session.presentationMode,
+    fullHandStage: session.presentationMode === "FROM_START" ? "PREFLOP" : undefined,
     equityModel: session.equityModel,
     stackDepthBb: session.stackBb ?? undefined,
     heroPosition: session.heroPosition ?? undefined,
@@ -588,7 +786,7 @@ function sameConfig(left: TrainingConfig, right: TrainingConfig) {
     && left.targetQuestions === right.targetQuestions;
 }
 
-type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; trainingType: TrainingType; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
+type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; trainingType: TrainingType | null; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
 
 function buildReport(session: typeof trainingSessions.$inferSelect, answers: ReportAnswerRow[]): TrainingReport {
   const answered = session.answeredQuestions;
@@ -620,6 +818,7 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Rep
     detailsTruncated: answers.length < answered,
     detailAnswers: answers.length,
     completionReason: session.completionReason!,
+    presentationMode: session.presentationMode,
     trainingType: session.trainingType,
     equityModel: session.equityModel,
     stackDepthBb: session.stackBb,
@@ -637,19 +836,27 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Rep
     byDecisionType,
     mostMissedHands,
     errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: reportAnswerActionLabel(answer, answer.selectedAction), bestAction: reportAnswerActionLabel(answer, answer.bestAction) })),
-    decisionDetails: answers.map((answer) => ({
-      questionIndex: answer.questionIndex,
-      handClass: answer.handClass,
-      heroPosition: answer.heroPosition,
-      selectedAction: reportAnswerActionLabel(answer, answer.selectedAction),
-      selectedKey: actionKey(answer.selectedAction as TrainingAction),
-      bestAction: reportAnswerActionLabel(answer, answer.bestAction),
-      isCorrect: answer.isCorrect,
-      isMixed: Boolean(answer.isMixed),
-      strategy: answer.strategy,
-      evs: answer.evs,
-      evUnit: answer.evUnit,
-    })),
+    decisionDetails: answers.map((answer) => {
+      const availableActions = answer.availableActions as TrainingAction[];
+      const selectedKey = actionKey(answer.selectedAction as TrainingAction);
+      const classification = classifyTrainingChoice(selectedKey, availableActions, answer.bestAction, answer.strategy, Boolean(answer.isMixed));
+      return {
+        questionIndex: answer.questionIndex,
+        handClass: answer.handClass,
+        heroPosition: answer.heroPosition,
+        selectedAction: reportAnswerActionLabel(answer, answer.selectedAction),
+        selectedKey,
+        bestAction: reportAnswerActionLabel(answer, answer.bestAction),
+        dominantAction: classification?.dominantAction ? reportAnswerActionLabel(answer, classification.dominantAction.action) : reportAnswerActionLabel(answer, answer.bestAction),
+        grade: classification?.grade ?? (answer.isCorrect ? "CORRECT" : "WRONG"),
+        selectedFrequencyPercent: classification?.selectedAction?.frequencyPercent ?? null,
+        isCorrect: answer.isCorrect,
+        isMixed: Boolean(answer.isMixed),
+        strategy: answer.strategy,
+        evs: answer.evs,
+        evUnit: answer.evUnit,
+      };
+    }),
     feedback,
   };
 }
@@ -663,6 +870,7 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     detailsTruncated: false,
     detailAnswers: 0,
     completionReason: session.completionReason!,
+    presentationMode: session.presentationMode,
     trainingType: session.trainingType,
     equityModel: session.equityModel,
     stackDepthBb: session.stackBb,
@@ -738,10 +946,10 @@ async function distinct<T>(column: PgColumn, filters: TrainingFilters, keys: Arr
   const rows = await getDb().selectDistinct({ value: column }).from(trainingHands)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
     .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
-    .where(and(...conditions(filters, keys), eligibleHandCondition())).orderBy(asc(column));
+    .where(and(DECISION_NODE_CONDITION, ...conditions(filters, keys), eligibleHandCondition())).orderBy(asc(column));
   return rows.map((row) => row.value).filter((value) => value !== null) as unknown as T[];
 }
 
-const POSITION_ORDER = ["UTG", "UTG+1", "UTG+2", "UTG+3", "EP", "MP", "MP1", "MP2", "HJ", "CO", "BTN", "BU", "SB", "BB"];
+const POSITION_ORDER = ["UTG", "UTG+1", "LJ", "UTG+2", "UTG+3", "EP", "MP", "MP1", "MP2", "HJ", "CO", "BTN", "BU", "SB", "BB"];
 function positionRank(position: string) { const index = POSITION_ORDER.indexOf(position); return index < 0 ? 99 : index; }
 function sortPositions(positions: string[]) { return positions.sort((left, right) => positionRank(left) - positionRank(right) || left.localeCompare(right)); }

@@ -8,6 +8,7 @@ import {
   presentStrategy,
   rangeActionShares,
   recordValue,
+  sameAction,
   trainingTypeLabels,
   type NodeRange,
   type NodeRangeHand,
@@ -178,11 +179,11 @@ function HandDetailsPopover({ id, hand, strategy, exercise, pinned, horizontal, 
       <div><strong>{hand.handClass}</strong><span>{exercise.heroPosition} · {formatBb(exercise.heroStackBb)} BB</span></div>
       {pinned && <button type="button" aria-label="Fechar detalhes" onClick={onClose}>×</button>}
     </header>
-    <p>{trainingTypeLabels[exercise.trainingType]} · {equityModelLabels[exercise.equityModel]}</p>
+    <p>{exercise.trainingType ? trainingTypeLabels[exercise.trainingType] : "Mão completa"} · {equityModelLabels[exercise.equityModel]}</p>
     <div className="rl-range-popover-actions">
       {strategy.actions.map((item) => {
         const ev = recordValue(hand.evs, item.action);
-        const best = bestAction ? actionAliases(item.action).some((alias) => actionAliases(bestAction).includes(alias)) : false;
+        const best = bestAction ? sameAction(item.action, bestAction) : false;
         return <div className={best ? "best" : ""} key={item.key}>
           <span>{actionLabel(item.action, exercise)}{best && <i>Melhor</i>}</span>
           <small>Frequência <b>{formatFrequency(item.frequencyPercent)}</b></small>

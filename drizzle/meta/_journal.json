@@ -64,6 +64,20 @@
       "when": 1786659846628,
       "tag": "0008_nifty_ravenous",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786805513015,
+      "tag": "0009_dusty_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786807075731,
+      "tag": "0010_lonely_electro",
+      "breakpoints": true
     }
   ]
 }

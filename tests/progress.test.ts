@@ -63,6 +63,30 @@ test("mantém métricas sem base matemática como indisponíveis", () => {
   assert.deepEqual(dashboard.costlySpots, []);
 });
 
+test("ordena LJ entre UTG+1 e HJ no progresso por posição", () => {
+  const now = Date.UTC(2026, 7, 9);
+  const positions = ["HJ", "LJ", "UTG+1"];
+  const answers: ProgressAnswerRecord[] = positions.map((heroPosition, index) => ({
+    sessionId: "session-positions",
+    trainingType: "OPEN_FOLD",
+    equityModel: "CHIP_EV",
+    evUnit: "CHIPS",
+    trainingNodeId: `node-${index}`,
+    handClass: "A7o",
+    heroPosition,
+    stackBb: 10,
+    selectedAction: { id: "action-1", type: "RAISE" },
+    bestAction: "action-1",
+    isCorrect: true,
+    evs: { "action-1": 10 },
+    bigBlind: 100,
+    answeredAt: now - index,
+  }));
+
+  const dashboard = buildProgressDashboard([], answers, now);
+  assert.deepEqual(dashboard.performance.position.map((item) => item.label), ["UTG+1", "LJ", "HJ"]);
+});
+
 test("exige amostra mínima e ordena spots pelo EV efetivamente perdido", () => {
   const now = Date.UTC(2026, 7, 9);
   const session: ProgressSessionRecord = {

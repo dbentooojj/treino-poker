@@ -12,7 +12,7 @@ export function TrainingTable({ exercise, showHistory }: { exercise: TrainingExe
         <ContextRow icon="user" label="Posição do Hero" value={displayTrainingPosition(exercise.heroPosition, exercise.playersCount)} accent/>
         <ContextRow icon="stack" label="Stack do Hero" value={`${formatBb(exercise.heroStackBb)} BB`} accent/>
         <ContextRow icon="history" label="Ação até você" value={actionUntilHero(exercise)}/>
-        <ContextRow icon="nodes" label="Tipo de treino" value={trainingTypeLabels[exercise.trainingType]}/>
+        <ContextRow icon="nodes" label="Tipo de treino" value={exercise.trainingType ? trainingTypeLabels[exercise.trainingType] : "Mão completa"}/>
         <ContextRow icon="chart" label="Modelo" value={equityModelLabels[exercise.equityModel]}/>
       </dl>
     </section>
@@ -44,7 +44,7 @@ export function TrainingFeedbackContext({ exercise, children }: { exercise: Trai
       </dl>
       <div className="rl-feedback-context-meta">
         <dl>
-          <ContextRow icon="nodes" label="Tipo de treino" value={trainingTypeLabels[exercise.trainingType]}/>
+          <ContextRow icon="nodes" label="Tipo de treino" value={exercise.trainingType ? trainingTypeLabels[exercise.trainingType] : "Mão completa"}/>
           <ContextRow icon="chart" label="Modelo" value={equityModelLabels[exercise.equityModel]}/>
         </dl>
         {children}

@@ -32,7 +32,7 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   await migrate(getDb(), { migrationsFolder: "drizzle" });
   const sqlClient = getSqlClient();
   const [{ count: migrationCount }] = await sqlClient<{ count: number }[]>`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-  assert.equal(migrationCount, 9, "as migrations devem ser aplicadas");
+  assert.equal(migrationCount, 11, "as migrations devem ser aplicadas");
 
   const [{ data_type: hashType }] = await sqlClient<{ data_type: string }[]>`
     SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'training_sets' AND column_name = 'content_hash'`;
@@ -260,9 +260,9 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   reimportStudy.contentHash = "e".repeat(64);
   reimportStudy.name = "Estudo para reimportar";
   const archivedVersion = await persistHrcStudy(reimportStudy, adminUser.id);
-  await sqlClient`UPDATE training_sets SET status = 'ARCHIVED', is_published = false, published_at = NULL WHERE id = ${archivedVersion.id}`;
+  await sqlClient`UPDATE training_sets SET metadata = jsonb_set(metadata, '{validationVersion}', '3'::jsonb) WHERE id = ${archivedVersion.id}`;
   const replacementVersion = await persistHrcStudy(reimportStudy, adminUser.id);
-  assert.notEqual(replacementVersion.id, archivedVersion.id, "a versão validada deve preservar o estudo arquivado");
+  assert.notEqual(replacementVersion.id, archivedVersion.id, "a reimportação V4 deve preservar e arquivar automaticamente a versão antiga");
   await assert.rejects(persistHrcStudy(reimportStudy, adminUser.id), /já foi importado/, "uma versão ativa continua protegida contra duplicação");
   const [{ archived, active }] = await sqlClient<{ archived: number; active: number }[]>`
     SELECT count(*) FILTER (WHERE status = 'ARCHIVED')::int AS archived,
@@ -317,7 +317,11 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   emptyStudy.nodes = [];
   emptyStudy.sourceNodes = emptyStudy.sourceNodes.map((node) => ({ ...node, trainingNodeKey: null, ignoredReason: "NON_TRAINABLE" }));
   const emptyPersisted = await persistHrcStudy(emptyStudy, adminUser.id);
-  await assert.rejects(setStudyPublished(emptyPersisted.id, true), /não possui spots treináveis/, "publicação vazia deve ser bloqueada no backend");
+  await assert.rejects(
+    setStudyPublished(emptyPersisted.id, true),
+    /não possui modos de treinamento compatíveis/,
+    "publicação vazia deve ser bloqueada no backend",
+  );
   const emptyDelete = await deleteStudyRoute(new Request(`http://localhost/api/studies/${emptyPersisted.id}`, {
     method: "DELETE",
     headers: { cookie: `rangelab_session=${login.token}`, origin: "http://localhost" },
@@ -336,10 +340,15 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   assert.equal(publishedOptions.hasMatches, true, "estudo publicado deve aparecer nos filtros");
   assert.deepEqual(publishedOptions.trainingTypes, ["PUSH_FOLD"]);
 
+  await assert.rejects(
+    createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1, presentationMode: "FROM_START", fullHandStage: "PREFLOP" } }),
+    /Nenhum estudo de mão completa/,
+    "um estudo sem árvore validada não pode aparecer como Full Hand",
+  );
   const beforeFromStart = await entityCounts(sqlClient);
-  const anySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1, presentationMode: "FROM_START" } });
+  const anySession = await createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1 } });
   assert.equal(anySession.config.trainingType, null, "Any deve criar uma sessão sem restringir o tipo de spot");
-  assert.equal(anySession.config.presentationMode, "FROM_START", "Desde o início deve ser somente um modo de apresentação");
+  assert.equal(anySession.config.presentationMode, undefined);
   assert.equal(anySession.exercise.trainingType, "PUSH_FOLD", "a pergunta continua preservando sua categoria real");
   const afterFromStart = await entityCounts(sqlClient);
   assert.equal(afterFromStart.nodes, beforeFromStart.nodes, "Desde o início não duplica training_nodes");
@@ -552,6 +561,7 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   assert.equal(review.exercise.trainingNodeId, freeSession.exercise.trainingNodeId);
   assert.equal(review.exercise.trainingHandId, freeSession.exercise.trainingHandId);
   await assert.rejects(createTrainingSession(adminUser.id, { mode: "REVIEW_ERRORS", sourceSessionId: trainingSession.id }), /Nenhum erro/);
+  await finishTrainingSession(adminUser.id, review.id);
 
   const [lineage] = await sqlClient<{ set_name: string; hero_position: string; hand_class: string; strategy: Record<string, number>; evs: Record<string, number> }[]>`
     SELECT s.name AS set_name, n.hero_position, h.hand_class, h.strategy, h.evs
@@ -559,6 +569,54 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
     WHERE s.id = ${imported.study.id} AND h.hand_class = 'A7s'`;
   assert.equal(lineage.hero_position, "SB");
   assert.equal(lineage.evs["action-1"], 2.5, "a linhagem set → node → hand deve ser consultável");
+
+  const fullStudyImport = toHrcStudyImport(await parseHrcPack(fullHandZipFile()));
+  const fullStudy = await persistHrcStudy(fullStudyImport, adminUser.id);
+  assert.ok(fullStudy.capabilities.includes("FULL_HAND_PREFLOP"));
+  await setStudyPublished(fullStudy.id, true);
+  await sqlClient`UPDATE study_capabilities
+    SET metadata = jsonb_set(metadata, '{eligibleHeroPlayers}', '[0]'::jsonb)
+    WHERE training_set_id = ${fullStudy.id} AND capability = 'FULL_HAND_PREFLOP'`;
+  const fullOptions = await getTrainingOptions({});
+  assert.deepEqual(fullOptions.fullHandStages.map((option) => option.stage), ["PREFLOP"]);
+  const fullSession = await createTrainingSession(adminUser.id, {
+    mode: "START",
+    config: {
+      trainingType: null,
+      equityModel: "CHIP_EV",
+      targetQuestions: 1,
+      presentationMode: "FROM_START",
+      fullHandStage: "PREFLOP",
+    },
+  });
+  const firstHeroHand = fullSession.exercise.handClass;
+  const firstRaise = fullSession.exercise.availableActions.find((action) => action.type === "RAISE")!;
+  const firstFullAnswer = await answerTrainingSession(adminUser.id, {
+    sessionId: fullSession.id,
+    questionIndex: 0,
+    trainingNodeId: fullSession.exercise.trainingNodeId,
+    trainingHandId: fullSession.exercise.trainingHandId,
+    selectedAction: actionKey(firstRaise),
+  });
+  assert.equal(firstFullAnswer.completedHands, 0);
+  assert.equal(firstFullAnswer.report, null, "a primeira decisão do Hero não encerra a mão");
+  assert.equal(firstFullAnswer.nextExercise?.handClass, firstHeroHand, "as cartas do Hero permanecem durante a mão");
+  assert.equal(firstFullAnswer.nextExercise?.actionSequence.length, 2, "a ação do vilão deve seguir a aresta real antes de voltar ao Hero");
+  const heroCall = firstFullAnswer.nextExercise!.availableActions.find((action) => action.type === "CALL")!;
+  const terminalAnswer = await answerTrainingSession(adminUser.id, {
+    sessionId: fullSession.id,
+    questionIndex: 1,
+    trainingNodeId: firstFullAnswer.nextExercise!.trainingNodeId,
+    trainingHandId: firstFullAnswer.nextExercise!.trainingHandId,
+    selectedAction: actionKey(heroCall),
+  });
+  assert.equal(terminalAnswer.completedHands, 1);
+  assert.ok(terminalAnswer.report, "o relatório só aparece no terminal pré-flop");
+  assert.equal(terminalAnswer.report?.answeredQuestions, 2);
+  const repeatedFullHand = await createTrainingSession(adminUser.id, { mode: "REPEAT", sourceSessionId: fullSession.id });
+  assert.equal(repeatedFullHand.config.fullHandStage, "PREFLOP");
+  assert.equal(repeatedFullHand.completedHands, 0);
+  await finishTrainingSession(adminUser.id, repeatedFullHand.id);
 });
 
 async function proveHistoricalSessionUpgrade(adminClient: postgres.Sql, sourceUrl: string) {
@@ -643,6 +701,8 @@ async function proveHistoricalSessionUpgrade(adminClient: postgres.Sql, sourceUr
     await applyMigrationSql(upgrade, new URL("../drizzle/0006_archived_study_reimport.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0007_email_verification.sql", import.meta.url));
     await applyMigrationSql(upgrade, new URL("../drizzle/0008_nifty_ravenous.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0009_dusty_squirrel_girl.sql", import.meta.url));
+    await applyMigrationSql(upgrade, new URL("../drizzle/0010_lonely_electro.sql", import.meta.url));
 
     const [{ email_verified_at: legacyEmailVerifiedAt }] = await upgrade<{ email_verified_at: Date | null }[]>`
       SELECT email_verified_at FROM users WHERE id = ${userId}`;
@@ -829,6 +889,47 @@ function integrationHands(bestEv: number, actionCount: number) {
     const evs = Array.from({ length: actionCount }, (_, index) => index === actionCount - 1 ? bestEv : 0);
     return [currentHand, { weight: currentHand === "22" ? 0.005 : 1, played, evs }];
   }));
+}
+
+function fullHandZipFile() {
+  const settings = {
+    handdata: { stacks: [1_000, 1_000], blinds: [100, 50, 10], skipSb: false, movingBu: true, anteType: "BB Ante" },
+    eqmodel: { id: "chipEV", raked: false },
+  };
+  const hands = integrationHands(2.5, 2);
+  const root = {
+    player: 0,
+    street: 0,
+    children: 1,
+    sequence: [],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 300, node: 1 }],
+    hands,
+  };
+  const villain = {
+    player: 1,
+    street: 0,
+    children: 1,
+    sequence: [{ type: "R", amount: 300, player: 0, street: 0 }],
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 900, node: 2 }],
+    hands,
+  };
+  const heroAgain = {
+    player: 0,
+    street: 0,
+    children: 0,
+    sequence: [
+      { type: "R", amount: 300, player: 0, street: 0 },
+      { type: "R", amount: 900, player: 1, street: 0 },
+    ],
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 600 }],
+    hands,
+  };
+  return new File([createZip({
+    "settings.json": JSON.stringify(settings),
+    "nodes/0.json": JSON.stringify(root),
+    "nodes/1.json": JSON.stringify(villain),
+    "nodes/2.json": JSON.stringify(heroAgain),
+  })], "full-hand-study.zip", { type: "application/zip" });
 }
 
 function createZip(entries: Record<string, string>) {

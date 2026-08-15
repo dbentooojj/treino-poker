@@ -34,7 +34,7 @@ const TABLE_POSITIONS: Record<number, string[]> = {
   5: ["HJ", "CO", "BTN", "SB", "BB"],
   6: ["UTG", "HJ", "CO", "BTN", "SB", "BB"],
   7: ["UTG", "UTG+1", "HJ", "CO", "BTN", "SB", "BB"],
-  8: ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"],
+  8: ["UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB"],
   9: ["UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO", "BTN", "SB", "BB"],
   10: ["UTG", "UTG+1", "UTG+2", "UTG+3", "MP", "HJ", "CO", "BTN", "SB", "BB"],
 };
@@ -141,7 +141,10 @@ export function deriveTrainingTableVisualState(
       // The current exercise payload only exposes Hero's stack. Villain stacks
       // stay absent instead of being inferred from the effective stack.
       ...(isHero ? { stackBb: exercise.heroStackBb } : {}),
-      committedBb: roundBb((liveContributions.get(position) ?? 0) + (deadContributions.get(position) ?? 0)),
+      // Antes e demais fichas mortas já aparecem no pote central. Junto ao
+      // assento mostramos apenas a aposta viva para não transformar o BB em
+      // "2 BB" quando ele postou 1 BB de blind e 1 BB de BB ante.
+      committedBb: roundBb(liveContributions.get(position) ?? 0),
       lastAction: lastActions.get(position),
       isActing: sequenceComplete ? isHero : latestActor === position,
     };

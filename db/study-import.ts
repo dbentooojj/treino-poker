@@ -2,7 +2,7 @@ import { and, eq, ne } from "drizzle-orm";
 import { normalizeHrcNodeReference, type HrcStudyImport } from "../lib/hrc-import";
 import { getDb } from "./index";
 import { hasPostgresErrorCode } from "./errors";
-import { hrcSourceEdges, hrcSourceNodes, trainingHands, trainingNodes, trainingSets } from "./schema";
+import { hrcSourceEdges, hrcSourceHands, hrcSourceNodes, studyCapabilities, trainingHands, trainingNodes, trainingSets } from "./schema";
 
 export type PersistedHrcStudy = {
   id: string;
@@ -19,6 +19,7 @@ export type PersistedHrcStudy = {
   isPublished: false;
   spotCount: number;
   importedAt: number;
+  capabilities: Array<HrcStudyImport["capabilities"][number]["capability"]>;
 };
 
 export class DuplicateHrcStudyError extends Error {
@@ -31,8 +32,6 @@ export class DuplicateHrcStudyError extends Error {
 export async function persistHrcStudy(study: HrcStudyImport, importedBy: string): Promise<PersistedHrcStudy> {
   const db = getDb();
   const activeDuplicate = and(eq(trainingSets.contentHash, study.contentHash), ne(trainingSets.status, "ARCHIVED"));
-  const [duplicate] = await db.select({ name: trainingSets.name }).from(trainingSets).where(activeDuplicate).limit(1);
-  if (duplicate) throw new DuplicateHrcStudyError(duplicate.name);
 
   const setId = crypto.randomUUID();
   const importedAt = new Date();
@@ -41,6 +40,7 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     trainingSetId: setId,
     nodeKey: node.nodeKey,
     trainingType: node.trainingType,
+    decisionEligible: node.decisionEligible,
     heroPosition: node.heroPosition,
     heroStackBb: node.heroStackBb,
     villainPosition: node.villainPosition,
@@ -48,8 +48,9 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     availableActions: node.availableActions,
     metadata: node.metadata,
   }));
-  const nodeTypes = [...new Set(study.nodes.map((node) => node.trainingType))];
+  const nodeTypes = [...new Set(study.nodes.map((node) => node.trainingType).filter((type): type is NonNullable<typeof type> => type !== null))];
   const trainingNodeIds = new Map(nodeRows.map((node) => [node.nodeKey, node.id]));
+  const decisionNodeKeys = new Set(study.nodes.filter((node) => node.decisionEligible).map((node) => node.nodeKey));
   const sourceRowIds = study.sourceNodes.map(() => crypto.randomUUID());
   const sourceNodeIdsByReference = new Map<string, string | null>();
   study.sourceNodes.forEach((node, index) => {
@@ -64,6 +65,23 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
 
   try {
     await db.transaction(async (tx) => {
+      const [duplicate] = await tx.select({
+        id: trainingSets.id,
+        name: trainingSets.name,
+        metadata: trainingSets.metadata,
+      }).from(trainingSets).where(activeDuplicate).limit(1).for("update");
+      if (duplicate) {
+        const existingVersion = Number(duplicate.metadata.validationVersion);
+        const incomingVersion = Number(study.metadata.validationVersion);
+        if (!Number.isInteger(existingVersion) || !Number.isInteger(incomingVersion) || incomingVersion <= existingVersion) {
+          throw new DuplicateHrcStudyError(duplicate.name);
+        }
+        await tx.update(trainingSets).set({
+          status: "ARCHIVED",
+          isPublished: false,
+          publishedAt: null,
+        }).where(eq(trainingSets.id, duplicate.id));
+      }
       await tx.insert(trainingSets).values({
         id: setId,
         name: study.name,
@@ -86,6 +104,22 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
         importedAt,
         metadata: { ...study.metadata, importedBy, contentHash: study.contentHash, archiveSizeBytes: study.archiveSizeBytes },
       });
+      if (study.capabilities.length) {
+        await tx.insert(studyCapabilities).values(study.capabilities.map((item) => {
+          const rootReference = typeof item.metadata.rootSourceNodeId === "string"
+            ? sourceNodeIdsByReference.get(normalizeHrcNodeReference(item.metadata.rootSourceNodeId) ?? "") ?? null
+            : null;
+          return {
+            id: crypto.randomUUID(),
+            trainingSetId: setId,
+            capability: item.capability,
+            metadata: {
+              ...item.metadata,
+              ...(rootReference ? { rootSourceNodeId: rootReference } : {}),
+            },
+          };
+        }));
+      }
       for (const chunk of chunks(nodeRows, 500)) await tx.insert(trainingNodes).values(chunk);
       for (let nodeIndex = 0; nodeIndex < study.nodes.length; nodeIndex += 1) {
         const handRows = study.nodes[nodeIndex].hands.map((hand) => ({
@@ -112,10 +146,24 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
           street: node.street,
           actionSequence: node.sequence,
           actions: node.actions,
-          isTrainable: node.trainingNodeKey !== null,
+          isTrainable: node.trainingNodeKey ? decisionNodeKeys.has(node.trainingNodeKey) : false,
           metadata: { ...node.metadata, ignoredReason: node.ignoredReason },
         }));
         await tx.insert(hrcSourceNodes).values(sourceRows);
+      }
+      for (let nodeIndex = 0; nodeIndex < study.sourceNodes.length; nodeIndex++) {
+        const hands = study.sourceNodes[nodeIndex].hands;
+        if (!hands.length) continue;
+        const handRows = hands.map((hand) => ({
+          id: crypto.randomUUID(),
+          sourceNodeId: sourceRowIds[nodeIndex],
+          handClass: hand.handClass,
+          strategy: hand.strategy,
+          evs: hand.evs,
+          weight: hand.weight,
+          metadata: hand.metadata,
+        }));
+        for (const chunk of chunks(handRows, 1_000)) await tx.insert(hrcSourceHands).values(chunk);
       }
       let sourceEdgeBatch: Array<{
         id: string;
@@ -171,8 +219,9 @@ export async function persistHrcStudy(study: HrcStudyImport, importedBy: string)
     anteType: study.anteType,
     status: "IMPORTED",
     isPublished: false,
-    spotCount: nodeRows.length,
+    spotCount: study.nodes.filter((node) => node.decisionEligible).length,
     importedAt: importedAt.getTime(),
+    capabilities: study.capabilities.map((item) => item.capability),
   };
 }
 

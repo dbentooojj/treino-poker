@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PokerCard, Rank } from "../../lib/poker/cards";
-import { actionAliases, actionKey, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext, type TrainingViewMode } from "../../lib/training";
+import { actionAliases, actionKey, classifyTrainingChoice, formatBb, recordValue, type AnswerEvaluation, type TrainingAction, type TrainingChoiceGrade, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext, type TrainingViewMode } from "../../lib/training";
 import { PlayingCard } from "../play/PlayingCard";
 import { UnifiedActionPanel } from "./UnifiedActionPanel";
 import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
-import { UnifiedResultPanel } from "./UnifiedResultPanel";
-import { buildTrainingPrompt, deriveTrainingTableVisualState, normalizeTrainingPosition, sequenceActionLabel, visibleTrainingTableSeats } from "./trainingPresentation";
+import { UnifiedResultPanel, type UnifiedResultReview } from "./UnifiedResultPanel";
+import { buildTrainingPrompt, deriveTrainingTableVisualState, displayTrainingPosition, normalizeTrainingPosition, sequenceActionLabel, visibleTrainingTableSeats } from "./trainingPresentation";
 
 export type SpotFeedback = {
   answer: AnswerEvaluation;
@@ -26,10 +26,16 @@ type TrainingDecisionProps = {
   busy: boolean;
   feedback?: SpotFeedback | null;
   nextLabel?: string;
+  nextCompactLabel?: string;
+  nextCountdown?: number | null;
+  nextAutoAdvanceActive?: boolean;
+  nextDisabled?: boolean;
+  nextAriaLabel?: string;
   viewMode?: TrainingViewMode;
   onChoose: (action: TrainingAction) => void;
   onRepeat?: () => void;
   onNext?: () => void;
+  onFeedbackInteraction?: () => void;
 };
 
 export function TrainingDecision(props: TrainingDecisionProps) {
@@ -57,14 +63,33 @@ function FullHandReplayDecision(props: TrainingDecisionProps) {
   return <TrainingDecisionContent {...props} viewMode="full-hand" visibleActionCount={visibleActionCount} replayStatus={replayStatus}/>;
 }
 
-function TrainingDecisionContent({ exercise, busy, feedback, nextLabel = "Próximo spot", viewMode, visibleActionCount, replayStatus, onChoose, onRepeat, onNext }: TrainingDecisionProps & {
+function TrainingDecisionContent({ exercise, busy, feedback, nextLabel = "Próximo spot", nextCompactLabel, nextCountdown, nextAutoAdvanceActive, nextDisabled, nextAriaLabel, viewMode, visibleActionCount, replayStatus, onChoose, onRepeat, onNext, onFeedbackInteraction }: TrainingDecisionProps & {
   viewMode: TrainingViewMode;
   visibleActionCount: number;
   replayStatus?: React.ReactNode;
 }) {
-  return <section className="spot-training-decision" data-training-view-mode={viewMode} aria-labelledby="training-question">
+  return <section className="spot-training-decision" data-training-view-mode={viewMode} data-feedback={feedback ? "true" : "false"} aria-labelledby={feedback ? "spot-result-title" : "training-question"}>
+    <MobileActionHistory exercise={exercise} visibleActionCount={visibleActionCount} feedback={Boolean(feedback)}/>
     <div className="play-table-stage spot-table-stage"><SpotPokerTable exercise={exercise} viewMode={viewMode} visibleActionCount={visibleActionCount}/></div>
-    {replayStatus ?? (feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} onRepeat={onRepeat} onNext={onNext}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>)}</section>;
+    {replayStatus ?? (feedback ? <SpotResult exercise={exercise} feedback={feedback} nextLabel={nextLabel} nextCompactLabel={nextCompactLabel} nextCountdown={nextCountdown} nextAutoAdvanceActive={nextAutoAdvanceActive} nextDisabled={nextDisabled} nextAriaLabel={nextAriaLabel} viewMode={viewMode} onRepeat={onRepeat} onNext={onNext} onFeedbackInteraction={onFeedbackInteraction}/> : <SpotActionPanel exercise={exercise} busy={busy} onChoose={onChoose}/>)}</section>;
+}
+
+function MobileActionHistory({ exercise, visibleActionCount, feedback }: { exercise: TrainingExercise; visibleActionCount: number; feedback: boolean }) {
+  const actions = exercise.actionSequence.slice(0, Math.max(0, Math.min(visibleActionCount, exercise.actionSequence.length)));
+  const historyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const history = historyRef.current;
+    if (history) history.scrollLeft = history.scrollWidth;
+  }, [actions.length, feedback]);
+  return <div ref={historyRef} className="spot-action-history" aria-label="Histórico de ações da mão">
+    <div>
+      {actions.map((action, index) => <span className={index === actions.length - 1 ? "is-latest" : ""} key={`${action.position ?? "action"}-${index}`}>
+        <b>{action.position ? displayTrainingPosition(action.position, exercise.playersCount) : `${index + 1}`}</b>
+        <small>{sequenceActionLabel(action, index, exercise.actionSequence)}</small>
+      </span>)}
+      <span className="is-current" aria-current="step">{feedback ? "Resultado" : actions.length < exercise.actionSequence.length ? "Em andamento" : "Sua vez"}</span>
+    </div>
+  </div>;
 }
 
 export function TrainingTablePreview({ context, loading = false }: { context: TrainingTableContext | null; loading?: boolean }) {
@@ -116,7 +141,6 @@ function SpotPokerTable({ exercise, viewMode, visibleActionCount }: { exercise: 
       allIn: seat.lastAction === "ALL_IN",
       dealer: seat.dealer,
       lastAction: seat.lastAction,
-      action: seat.lastAction ? { label: seat.lastAction.replace("_", "-"), tone: seat.lastAction.toLowerCase() } : undefined,
     };
   });
   return <UnifiedPokerTable
@@ -126,8 +150,9 @@ function SpotPokerTable({ exercise, viewMode, visibleActionCount }: { exercise: 
     potBb={tableState.potBb}
     showDeck={false}
     showChips
-    showPot={viewMode === "full-hand"}
+    showPot
     showSeatDetails
+    centerLabel={tableCenterLabel(exercise)}
     className="spot-poker-table"
     ariaLabel={`Mesa do spot com ${exercise.playersCount} jogadores`}
   />;
@@ -153,32 +178,81 @@ function SpotActionPanel({ exercise, busy, onChoose }: { exercise: TrainingExerc
   />;
 }
 
-function SpotResult({ exercise, feedback, nextLabel, onRepeat, onNext }: { exercise: TrainingExercise; feedback: SpotFeedback; nextLabel: string; onRepeat?: () => void; onNext?: () => void }) {
+function SpotResult({ exercise, feedback, nextLabel, nextCompactLabel, nextCountdown, nextAutoAdvanceActive, nextDisabled, nextAriaLabel, viewMode, onRepeat, onNext, onFeedbackInteraction }: { exercise: TrainingExercise; feedback: SpotFeedback; nextLabel: string; nextCompactLabel?: string; nextCountdown?: number | null; nextAutoAdvanceActive?: boolean; nextDisabled?: boolean; nextAriaLabel?: string; viewMode: TrainingViewMode; onRepeat?: () => void; onNext?: () => void; onFeedbackInteraction?: () => void }) {
   const { answer } = feedback;
   const selectedAction = exercise.availableActions.find((action) => actionAliases(action).includes(feedback.selectedKey));
   const bestAction = exercise.availableActions.find((action) => actionAliases(action).includes(answer.bestKey));
   const selectedLabel = selectedAction ? actionResultLabel(selectedAction, exercise) : feedback.selectedKey;
   const bestLabel = bestAction ? actionResultLabel(bestAction, exercise) : answer.bestLabel;
-  const summary = answer.correct
-    ? answer.isMixed ? `${selectedLabel} faz parte da estratégia mista deste spot.` : `Você escolheu ${selectedLabel}. Boa decisão.`
-    : `Você escolheu ${selectedLabel}. A ação de referência é ${bestLabel}.`;
+  const classification = classifyTrainingChoice(feedback.selectedKey, exercise.availableActions, answer.bestKey, answer.strategy, answer.isMixed);
+  const grade = classification?.grade ?? (answer.correct ? "CORRECT" : "WRONG");
+  const dominantLabel = classification?.dominantAction ? actionResultLabel(classification.dominantAction.action, exercise) : bestLabel;
+  const selectedFrequency = classification?.selectedAction?.frequencyPercent ?? null;
+  const presentation = resultPresentation(grade);
+  const summary = grade === "BEST"
+    ? `Você escolheu ${selectedLabel}, a ação de maior EV${answer.isMixed ? " deste mix" : " da estratégia"}.`
+    : grade === "CORRECT"
+      ? `Você escolheu ${selectedLabel}. A ação faz parte do mix; ${dominantLabel} aparece com mais frequência.`
+      : grade === "INACCURACY"
+        ? `Você escolheu ${selectedLabel}. O solver usa essa ação raramente neste spot.`
+        : `Você escolheu ${selectedLabel}. Essa ação não faz parte da estratégia do solver.`;
+  const evDelta = selectedAction ? decisionEvDelta(selectedAction, exercise.availableActions, answer.evs) : null;
+  const reviews: UnifiedResultReview[] = [
+    ...(viewMode === "full-hand" ? [{ id: "preflop", status: grade, label: "Pré-flop" }] : []),
+  ];
   return <UnifiedResultPanel
     score={answer.correct ? 100 : 0}
+    metricValue={selectedFrequency === null ? "—" : `${formatFrequency(selectedFrequency)}%`}
+    metricLabel="Frequência GTO"
+    metricProgress={selectedFrequency ?? 0}
+    resultIcon={presentation.icon}
+    badge={answer.isMixed ? "ESTRATÉGIA MISTA" : undefined}
     eyebrow="RESULTADO DO SPOT"
-    title={answer.correct ? "DECISÃO CORRETA" : "REVISAR DECISÃO"}
+    title={presentation.title}
     description={summary}
-    reviews={[
-      { id: "preflop", status: answer.correct ? "CORRECT" : "REVIEW", label: "Pré-flop" },
-      { id: "best", status: "NOT_PLAYED", label: "Melhor ação", value: bestLabel },
-    ]}
+    reviews={reviews}
+    details={<div className="spot-selected-choice" aria-label={`Escolha: ${selectedLabel}${selectedFrequency === null ? "" : `, ${formatFrequency(selectedFrequency)}% de frequência GTO`}`}><span>Escolha</span><b>{selectedLabel}</b>{selectedFrequency !== null && <strong>{formatFrequency(selectedFrequency)}% GTO</strong>}</div>}
+    footer={evDelta !== null ? <span>ΔEV da decisão: <b className={evDelta < 0 ? "is-negative" : ""}>{formatDecisionEv(evDelta, exercise.evUnit)}</b></span> : undefined}
     repeatLabel="Repetir spot"
     nextLabel={nextLabel}
-    tone={answer.correct ? "correct" : "review"}
+    nextCompactLabel={nextCompactLabel}
+    nextCountdown={nextCountdown}
+    nextAutoAdvanceActive={nextAutoAdvanceActive}
+    nextDisabled={nextDisabled}
+    nextAriaLabel={nextAriaLabel}
+    tone={presentation.tone}
     className="spot-result"
     titleId="spot-result-title"
+    onInteraction={onFeedbackInteraction}
     onRepeat={() => onRepeat?.()}
     onNext={() => onNext?.()}
   />;
+}
+
+function resultPresentation(grade: TrainingChoiceGrade) {
+  if (grade === "BEST") return { icon: "✓✓", title: "MELHOR JOGADA", tone: "best" as const };
+  if (grade === "CORRECT") return { icon: "✓", title: "JOGADA CORRETA", tone: "correct" as const };
+  if (grade === "INACCURACY") return { icon: "!", title: "IMPRECISÃO", tone: "inaccuracy" as const };
+  return { icon: "×", title: "JOGADA ERRADA", tone: "wrong" as const };
+}
+
+function decisionEvDelta(selectedAction: TrainingAction, actions: TrainingAction[], evs: Record<string, number>) {
+  const selectedEv = recordValue(evs, selectedAction);
+  const availableEvs = actions.map((action) => recordValue(evs, action)).filter((value): value is number => value !== null && Number.isFinite(value));
+  return selectedEv === null || availableEvs.length === 0 ? null : selectedEv - Math.max(...availableEvs);
+}
+
+function formatFrequency(value: number) {
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatDecisionEv(value: number, unit: TrainingExercise["evUnit"]) {
+  const sign = value < 0 ? "−" : value > 0 ? "+" : "";
+  const amount = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 3 }).format(Math.abs(value));
+  if (unit === "BIG_BLINDS") return `${sign}${amount} BB`;
+  if (unit === "CHIPS") return `${sign}${amount} fichas`;
+  if (unit === "ICM_UTILITY") return `${sign}${amount} ICM`;
+  return `${sign}${amount}`;
 }
 
 function handClassPokerCards(handClass: string): [PokerCard, PokerCard] {
@@ -213,4 +287,12 @@ function actionTone(action: TrainingAction, exercise: TrainingExercise) {
   if (action.label?.toLowerCase().includes("all-in")) return "all_in";
   if (typeof action.amountBb === "number" && action.amountBb >= exercise.heroStackBb - .01) return "all_in";
   return action.type.toLowerCase();
+}
+
+function tableCenterLabel(exercise: TrainingExercise) {
+  const hero = displayTrainingPosition(exercise.heroPosition, exercise.playersCount);
+  const latestActor = [...exercise.actionSequence].reverse().find((action) => action.position && action.type !== "FOLD")?.position;
+  return latestActor
+    ? `${displayTrainingPosition(latestActor, exercise.playersCount)} vs ${hero}`
+    : `${exercise.playersCount}-max · ${hero}`;
 }

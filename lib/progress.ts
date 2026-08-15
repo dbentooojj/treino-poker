@@ -15,7 +15,7 @@ export type ProgressSessionRecord = {
 
 export type ProgressAnswerRecord = {
   sessionId: string;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   equityModel: EquityModel;
   evUnit: EvUnit;
   trainingNodeId: string;
@@ -47,7 +47,7 @@ export type ProgressEvolutionPoint = {
 };
 
 export type ProgressWeakSpot = ProgressBreakdownItem & {
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
 };
 
 export type ProgressCostlySpot = {
@@ -98,7 +98,7 @@ export type ProgressDashboardData = {
 
 type Aggregate = { correct: number; total: number; timestamp: number; evLossBb: number; evSamples: number };
 
-const POSITION_ORDER = ["UTG", "UTG+1", "UTG+2", "UTG+3", "EP", "MP", "MP1", "MP2", "HJ", "CO", "BTN_BU", "SB", "BB"];
+const POSITION_ORDER = ["UTG", "UTG+1", "LJ", "UTG+2", "UTG+3", "EP", "MP", "MP1", "MP2", "HJ", "CO", "BTN_BU", "SB", "BB"];
 const MIN_WEAK_SPOT_SAMPLE = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DAY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
@@ -163,7 +163,7 @@ export function buildProgressDashboard(
     },
     evolution: aggregateEvolution(sessions),
     performance: {
-      training: aggregateAnswerBreakdown(answers, (answer) => answer.trainingType, (key) => trainingTypeLabels[key as TrainingType]),
+      training: aggregateAnswerBreakdown(answers, (answer) => answer.trainingType ?? "FULL_HAND", (key) => key === "FULL_HAND" ? "Mão completa" : trainingTypeLabels[key as TrainingType]),
       position: aggregateAnswerBreakdown(answers, (answer) => normalizePosition(answer.heroPosition), positionLabel, positionSort),
       stack: aggregateAnswerBreakdown(answers, (answer) => formatBb(answer.stackBb), (key) => `${key} BB`, (left, right) => Number(left.key) - Number(right.key)),
     },
@@ -237,10 +237,10 @@ function buildWeakSpots(answers: Array<ProgressAnswerRecord & { evLossBb: number
     addAnswer(groups, `${answer.trainingType}|${position}|${formatBb(answer.stackBb)}`, answer);
   }
   return [...groups.entries()].map(([key, aggregate]) => {
-    const [trainingType, position, stack] = key.split("|") as [TrainingType, string, string];
+    const [rawTrainingType, position, stack] = key.split("|") as [TrainingType | "null", string, string];
     return {
       ...breakdownItem(key, `${positionLabel(position)} · ${stack} BB`, aggregate),
-      trainingType,
+      trainingType: rawTrainingType === "null" ? null : rawTrainingType,
     };
   }).filter((item) => item.hands >= MIN_WEAK_SPOT_SAMPLE && (item.accuracy < 75 || (item.evLossBb ?? 0) > 0))
     .sort((left, right) => (right.evLossBb ?? -1) - (left.evLossBb ?? -1) || left.accuracy - right.accuracy || right.hands - left.hands)
@@ -254,7 +254,7 @@ function buildCostlySpots(answers: Array<ProgressAnswerRecord & { evLossBb: numb
     const stack = formatBb(answer.stackBb);
     const position = positionLabel(normalizePosition(answer.heroPosition));
     const key = `${answer.trainingType}|${answer.handClass}|${position}|${stack}`;
-    const current = groups.get(key) ?? { loss: 0, hands: 0, handClass: answer.handClass, context: `${position} · ${stack} BB · ${trainingTypeLabels[answer.trainingType]}` };
+    const current = groups.get(key) ?? { loss: 0, hands: 0, handClass: answer.handClass, context: `${position} · ${stack} BB · ${answer.trainingType ? trainingTypeLabels[answer.trainingType] : "Mão completa"}` };
     current.loss += answer.evLossBb;
     current.hands += 1;
     groups.set(key, current);

@@ -1,5 +1,7 @@
 export const TRAINING_TYPES = ["PUSH_FOLD", "CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET", "VS_4_BET"] as const;
 export const TRAINING_PRESENTATION_MODES = ["DECISION", "FROM_START"] as const;
+export const FULL_HAND_STAGES = ["PREFLOP"] as const;
+export const STUDY_CAPABILITIES = ["DECISION", "FULL_HAND_PREFLOP"] as const;
 export const TRAINING_VIEW_MODES = ["quick-decision", "full-hand"] as const;
 export const EQUITY_MODELS = ["CHIP_EV", "ICM"] as const;
 export const EV_UNITS = ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"] as const;
@@ -9,6 +11,8 @@ export const MAX_EXERCISE_QUEUE_SIZE = 100;
 
 export type TrainingType = (typeof TRAINING_TYPES)[number];
 export type TrainingPresentationMode = (typeof TRAINING_PRESENTATION_MODES)[number];
+export type FullHandStage = (typeof FULL_HAND_STAGES)[number];
+export type StudyCapability = (typeof STUDY_CAPABILITIES)[number];
 export type TrainingViewMode = (typeof TRAINING_VIEW_MODES)[number];
 export type EquityModel = (typeof EQUITY_MODELS)[number];
 export type EvUnit = (typeof EV_UNITS)[number];
@@ -26,6 +30,7 @@ export type TrainingAction = {
 export type TrainingSequenceAction = TrainingAction & { position?: string };
 export type TrainingStreet = "PREFLOP" | "FLOP" | "TURN" | "RIVER";
 export type TrainingGameType = "TOURNAMENT";
+export type TrainingChoiceGrade = "BEST" | "CORRECT" | "INACCURACY" | "WRONG";
 
 export type TrainingFilters = {
   trainingType?: TrainingType;
@@ -40,6 +45,7 @@ export type TrainingConfig = Required<Pick<TrainingFilters, "equityModel">> & {
   heroPosition?: string;
   targetQuestions: number | null;
   presentationMode?: TrainingPresentationMode;
+  fullHandStage?: FullHandStage;
 };
 
 // PresentationMode remains the persisted/API contract. ViewMode is the UI concept
@@ -66,6 +72,7 @@ export type TrainingOptions = {
   heroPositions: string[];
   hasMatches: boolean;
   tableContext: TrainingTableContext | null;
+  fullHandStages: Array<{ stage: FullHandStage; label: string; equityModel: EquityModel }>;
 };
 
 export type TrainingTableContext = {
@@ -88,7 +95,7 @@ export type QueueEntry = {
 export type TrainingExercise = QueueEntry & {
   setName: string;
   handClass: string;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   equityModel: EquityModel;
   evUnit: EvUnit;
   playersCount: number;
@@ -140,6 +147,13 @@ export type StrategyPresentation = {
   dominantAction: StrategyActionPresentation | null;
 };
 
+export type TrainingChoiceClassification = {
+  grade: TrainingChoiceGrade;
+  selectedAction: StrategyActionPresentation | null;
+  dominantAction: StrategyActionPresentation | null;
+  strategy: StrategyPresentation | null;
+};
+
 export type TrainingSession = {
   id: string;
   startedAt: number;
@@ -147,6 +161,7 @@ export type TrainingSession = {
   targetQuestions: number | null;
   answeredQuestions: number;
   correctAnswers: number;
+  completedHands: number;
   evDelta: number;
   evUnit: EvUnit;
   exercise: TrainingExercise;
@@ -160,6 +175,9 @@ export type TrainingDecisionDetail = {
   selectedAction: string;
   selectedKey: string;
   bestAction: string;
+  dominantAction: string;
+  grade: TrainingChoiceGrade;
+  selectedFrequencyPercent: number | null;
   isCorrect: boolean;
   isMixed: boolean;
   strategy: Record<string, number>;
@@ -172,6 +190,7 @@ export type TrainingReport = {
   detailsTruncated: boolean;
   detailAnswers: number;
   completionReason: CompletionReason;
+  presentationMode: TrainingPresentationMode;
   trainingType: TrainingType | null;
   equityModel: EquityModel;
   stackDepthBb: number | null;
@@ -231,7 +250,7 @@ export function actionLabel(action: TrainingAction, node: Pick<TrainingExercise,
 }
 
 export function buildSpotSignature(spot: {
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
   heroPosition: string;
   villainPosition: string | null;
   heroStackBb: number;
@@ -252,8 +271,9 @@ export function buildSpotSignature(spot: {
 }
 
 export function resolvedActionLabel(value: TrainingAction | string, actions: TrainingAction[], node: Pick<TrainingExercise, "heroStackBb" | "trainingType">) {
-  const aliases = typeof value === "string" ? [value] : actionAliases(value);
-  const resolved = actions.find((action) => actionAliases(action).some((alias) => aliases.includes(alias)));
+  const resolved = typeof value === "string"
+    ? actions.find((action) => action.id === value) ?? actions.find((action) => actionAliases(action).includes(value))
+    : actions.find((action) => sameAction(action, value));
   if (resolved) return actionLabel(resolved, node);
   if (typeof value !== "string") return actionLabel(value, node);
   return value;
@@ -262,10 +282,11 @@ export function resolvedActionLabel(value: TrainingAction | string, actions: Tra
 export function formatBb(value: number) { return Number(value.toFixed(2)).toString(); }
 export function isTrainingType(value: unknown): value is TrainingType { return typeof value === "string" && (TRAINING_TYPES as readonly string[]).includes(value); }
 export function isTrainingPresentationMode(value: unknown): value is TrainingPresentationMode { return typeof value === "string" && (TRAINING_PRESENTATION_MODES as readonly string[]).includes(value); }
+export function isFullHandStage(value: unknown): value is FullHandStage { return typeof value === "string" && (FULL_HAND_STAGES as readonly string[]).includes(value); }
 export function isEquityModel(value: unknown): value is EquityModel { return typeof value === "string" && (EQUITY_MODELS as readonly string[]).includes(value); }
 export function isQuestionCount(value: unknown): value is number | null { return value === null || (typeof value === "number" && (QUESTION_COUNTS as readonly number[]).includes(value)); }
 export function isTrainingPosition(value: unknown): value is string {
-  return typeof value === "string" && value.length <= 12 && /^(?:UTG(?:\+[1-7])?|EP|MP[1-7]?|HJ|CO|BTN|BU|SB|BB|P(?:[1-9]|10))$/.test(value);
+  return typeof value === "string" && value.length <= 12 && /^(?:UTG(?:\+[1-7])?|EP|MP[1-7]?|LJ|HJ|CO|BTN|BU|SB|BB|P(?:[1-9]|10))$/.test(value);
 }
 
 export function actionAliases(action: TrainingAction) {
@@ -273,7 +294,11 @@ export function actionAliases(action: TrainingAction) {
 }
 
 export function sameAction(left: TrainingAction, right: TrainingAction) {
-  return actionAliases(left).some((alias) => actionAliases(right).includes(alias));
+  if (left.id && right.id) return left.id === right.id;
+  if (left.type !== right.type) return false;
+  if (left.amountBb !== undefined || right.amountBb !== undefined) return left.amountBb === right.amountBb;
+  if (left.label && right.label) return left.label === right.label;
+  return true;
 }
 
 export function recordValue(record: Record<string, number>, action: TrainingAction) {
@@ -318,6 +343,31 @@ export function presentStrategy(strategy: Record<string, number>, actions: Train
   const dominantAction = [...presented].filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null)
     .sort((left, right) => right.frequencyPercent - left.frequencyPercent)[0] ?? null;
   return { actions: presented, isMixed: mixedHint ?? actionable.length > 1, dominantAction };
+}
+
+export function classifyTrainingChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, strategy?: Record<string, number>, mixedHint?: boolean): TrainingChoiceClassification | null {
+  const selected = actions.find((action) => actionAliases(action).includes(selectedKey));
+  if (!selected) return null;
+  const configuredBest = bestAction ? actions.find((action) => actionAliases(action).includes(bestAction)) : null;
+  const presented = strategy && isValidStrategy(strategy, actions) ? presentStrategy(strategy, actions, mixedHint) : null;
+  const selectedPresentation = presented?.actions.find((item) => sameAction(item.action, selected)) ?? null;
+  const selectedFrequency = selectedPresentation?.frequencyPercent;
+  if (selectedFrequency !== null && selectedFrequency !== undefined) {
+    const grade: TrainingChoiceGrade = configuredBest && sameAction(selected, configuredBest)
+      ? "BEST"
+      : selectedFrequency >= MIN_STRATEGY_FREQUENCY_PERCENT
+        ? "CORRECT"
+        : selectedFrequency > 0
+          ? "INACCURACY"
+          : "WRONG";
+    return { grade, selectedAction: selectedPresentation, dominantAction: presented?.dominantAction ?? null, strategy: presented };
+  }
+  return {
+    grade: configuredBest && sameAction(selected, configuredBest) ? "BEST" : "WRONG",
+    selectedAction: null,
+    dominantAction: null,
+    strategy: null,
+  };
 }
 
 export function rangeActionShares(strategy: Record<string, number>, actions: TrainingAction[]) {
@@ -378,10 +428,8 @@ export function evaluateChoice(selectedKey: string, actions: TrainingAction[], b
   const evBest = values.filter((item): item is typeof item & { value: number } => item.value !== null).sort((left, right) => right.value - left.value)[0];
   const configured = bestAction ? values.find((item) => actionAliases(item.action).includes(bestAction)) : undefined;
   const best = configured ?? evBest ?? values[0];
-  const presented = strategy && isValidStrategy(strategy, actions) ? presentStrategy(strategy, actions) : null;
-  const hasFrequencyData = presented?.actions.some((item) => item.frequencyPercent !== null) ?? false;
-  const selectedStrategy = presented?.actions.find((item) => sameAction(item.action, selected));
-  const correct = hasFrequencyData ? Boolean(selectedStrategy?.isInStrategy) : sameAction(selected, best.action);
+  const classification = classifyTrainingChoice(selectedKey, actions, best.key, strategy);
+  const correct = classification?.grade === "BEST" || classification?.grade === "CORRECT";
   return { correct, selected, selectedKey: actionKey(selected), bestKey: best.key, bestLabel: best.action.label ?? best.key };
 }
 

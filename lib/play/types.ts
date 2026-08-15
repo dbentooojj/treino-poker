@@ -95,7 +95,7 @@ export type HandActionRecord = {
 
 export type StreetReview = {
   street: Exclude<Street, "SHOWDOWN" | "FINISHED">;
-  status: "CORRECT" | "REVIEW" | "NOT_PLAYED";
+  status: "BEST" | "CORRECT" | "INACCURACY" | "WRONG" | "REVIEW" | "NOT_PLAYED";
 };
 
 export type HandResultState = {
@@ -104,6 +104,7 @@ export type HandResultState = {
   handLabel: string;
   score: number;
   reviews: StreetReview[];
+  evDeltaBb?: number | null;
   wonPotBb: number;
   showdown: boolean;
 };

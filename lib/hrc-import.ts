@@ -1,4 +1,4 @@
-import type { EvUnit, TrainingAction, TrainingSequenceAction, TrainingType } from "./training";
+import type { EvUnit, StudyCapability, TrainingAction, TrainingSequenceAction, TrainingType } from "./training";
 
 export type HrcAction = {
   type: "F" | "C" | "R" | "X";
@@ -57,7 +57,8 @@ export type HrcPack = HrcValidatedPack & { contentHash: string; archiveSizeBytes
 
 export type HrcStudyNode = {
   nodeKey: string;
-  trainingType: TrainingType;
+  trainingType: TrainingType | null;
+  decisionEligible: boolean;
   heroPosition: string;
   heroStackBb: number;
   villainPosition: string | null;
@@ -89,6 +90,18 @@ export type HrcSourceTreeNode = {
   trainingNodeKey: string | null;
   ignoredReason: HrcIgnoredReason | null;
   metadata: Record<string, unknown>;
+  hands: Array<{
+    handClass: string;
+    strategy: Record<string, number>;
+    evs: Record<string, number>;
+    weight: number;
+    metadata: Record<string, unknown>;
+  }>;
+};
+
+export type HrcStudyCapability = {
+  capability: StudyCapability;
+  metadata: Record<string, unknown>;
 };
 
 export type HrcStudyImport = {
@@ -106,6 +119,7 @@ export type HrcStudyImport = {
   icmContext: string | null;
   ignoredNodes: HrcIgnoredCounts;
   metadata: Record<string, unknown>;
+  capabilities: HrcStudyCapability[];
   sourceNodes: HrcSourceTreeNode[];
   nodes: HrcStudyNode[];
 };
@@ -126,6 +140,8 @@ export type HrcImportSummary = {
   counts: Record<TrainingType, number>;
   ignoredCount: number;
   ignoredNodes: HrcIgnoredCounts;
+  capabilities: StudyCapability[];
+  sourceHandClassCount: number;
 };
 
 export const HRC_IMPORT_LIMITS = {
@@ -168,7 +184,7 @@ export function positionNames(count: number) {
     5: ["HJ", "CO", "BTN", "SB", "BB"],
     6: ["UTG", "HJ", "CO", "BTN", "SB", "BB"],
     7: ["UTG", "UTG+1", "HJ", "CO", "BTN", "SB", "BB"],
-    8: ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"],
+    8: ["UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB"],
     9: ["UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO", "BTN", "SB", "BB"],
     10: ["UTG", "UTG+1", "UTG+2", "UTG+3", "MP", "HJ", "CO", "BTN", "SB", "BB"],
   };
@@ -183,7 +199,6 @@ export async function parseHrcPack(file: UploadedFile): Promise<HrcPack> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const rawSettings = parseJson(decoder.decode(await inflateEntry(bytes, archive.view, archive.settings)), archive.settings.name);
   const settings = parseSettings(rawSettings);
-  const preflopContext = createPreflopContext(settings);
   const nodes: HrcNode[] = [];
   const sourceIds = new Set<string>();
   let eligible = 0;
@@ -194,7 +209,7 @@ export async function parseHrcPack(file: UploadedFile): Promise<HrcPack> {
     if (sourceIds.has(node.sourceNodeId)) throw new HrcImportError(`Identificador de source node duplicado: ${node.sourceNodeId}.`);
     sourceIds.add(node.sourceNodeId);
     eligible += node.eligibleHandCount;
-    if (node.street !== 0 || !classifyHrcNodeDetailed(node, preflopContext).trainingType || node.eligibleHandCount === 0) node.hands = {};
+    if (node.street !== 0) node.hands = {};
     nodes.push(node);
   }
   if (!eligible) throw new HrcImportError("Nenhuma mão elegível foi encontrada neste estudo.");
@@ -267,10 +282,12 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
     const classification = classifyHrcNodeDetailed(node, preflopContext);
     if (classification.reason) ignoredNodes[classification.reason]++;
     const trainingType = classification.trainingType;
-    const rawHands = trainingType ? Object.entries(node.hands) : [];
+    const allRawHands = Object.entries(node.hands);
+    const materializeNode = node.street === 0 && node.player >= 0 && node.actions.length > 1 && allRawHands.length === 169;
+    const rawHands = materializeNode ? allRawHands : [];
     let trainingNode: HrcStudyNode | null = null;
 
-    if (trainingType && node.eligibleHandCount > 0 && rawHands.length) {
+    if (materializeNode && rawHands.length) {
       if (nodeKeys.has(node.nodeKey)) throw new HrcImportError(`Identificador de node duplicado no estudo: ${node.nodeKey}.`);
       nodeKeys.add(node.nodeKey);
       const availableActions = node.actions.map((action, actionIndex) => toTrainingAction(action, actionIndex, node, preflopContext, bigBlind, positions, trainingType));
@@ -296,6 +313,7 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
       trainingNode = {
         nodeKey: node.nodeKey,
         trainingType,
+        decisionEligible: trainingType !== null && node.eligibleHandCount > 0,
         heroPosition,
         heroStackBb: roundBb(stacks[node.player] / bigBlind),
         villainPosition,
@@ -310,12 +328,13 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
           hrcNodeSource: node.sourcePath,
           hrcPlayer: node.player,
           hrcChildren: node.children,
+          decisionTrainingEligible: trainingType !== null && node.eligibleHandCount > 0,
         },
       };
       nodes.push(trainingNode);
-      counts[trainingType]++;
+      if (trainingType) counts[trainingType]++;
       storedHandClassCount += trainingHands.length;
-      eligibleTrainingHandClassCount += trainingHands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length;
+      if (trainingType) eligibleTrainingHandClassCount += trainingHands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length;
     }
 
     sourceNodes.push({
@@ -332,6 +351,13 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
         hrcChildren: node.children,
         eligibleHandCount: node.eligibleHandCount,
       },
+      hands: trainingNode ? [] : allRawHands.map(([handClass, hand]) => ({
+        handClass,
+        strategy: Object.fromEntries(node.actions.map((_, index) => [`action-${index}`, hand.played[index]])),
+        evs: Object.fromEntries(node.actions.map((_, index) => [`action-${index}`, hand.evs[index]])),
+        weight: hand.weight,
+        metadata: hand.metadata,
+      })),
     });
 
     if (options.releaseRawHands) {
@@ -340,6 +366,20 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
       node.hands = {};
     }
   }
+
+  const fullHand = analyzeFullHandPreflop(sourceNodes, stacks.length);
+  const capabilities: HrcStudyCapability[] = [
+    ...(nodes.some((node) => node.decisionEligible) ? [{ capability: "DECISION" as const, metadata: { trainingNodeCount: nodes.filter((node) => node.decisionEligible).length } }] : []),
+    ...(fullHand.compatible ? [{
+      capability: "FULL_HAND_PREFLOP" as const,
+      metadata: {
+        rootSourceNodeId: fullHand.rootSourceNodeId,
+        reachableNodeCount: fullHand.reachableNodeCount,
+        terminalCount: fullHand.terminalCount,
+        eligibleHeroPlayers: fullHand.eligibleHeroPlayers,
+      },
+    }] : []),
+  ];
 
   return {
     name: pack.name,
@@ -355,20 +395,24 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
     anteType,
     icmContext: equityModel === "ICM" ? pack.settings.eqmodel.id || "ICM" : null,
     ignoredNodes,
+    capabilities,
     metadata: {
-      validationVersion: 3,
-      importerVersion: "HRC_COMPLETE_TREE_V3",
+      validationVersion: 4,
+      importerVersion: "HRC_COMPLETE_TREE_V4",
       sourceFormat: "HRC_COMPLETE_EXPORT",
       hrcEquityModel: pack.settings.eqmodel.id,
       hrcRaked: pack.settings.eqmodel.raked,
       hrcNodeCount: pack.nodes.length,
-      compatibleNodeCount: nodes.length,
+      compatibleNodeCount: nodes.filter((node) => node.decisionEligible).length,
+      fullHandDecisionNodeCount: nodes.length,
       preflopNodeCount,
       ignoredNodes,
       counts,
       storedHandClasses: storedHandClassCount,
       eligibleHands: eligibleTrainingHandClassCount,
       archiveSizeBytes: pack.archiveSizeBytes,
+      initialStacksBb: stacks.map((stack) => roundBb(stack / bigBlind)),
+      fullHandValidation: fullHand,
       hrcSettings: pack.settings.metadata,
     },
     sourceNodes,
@@ -378,7 +422,7 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
 
 export function summarizeHrcStudy(study: HrcStudyImport): HrcImportSummary {
   const counts = emptyTrainingTypeCounts();
-  for (const node of study.nodes) counts[node.trainingType]++;
+  for (const node of study.nodes) if (node.trainingType) counts[node.trainingType]++;
   return {
     name: study.name,
     equityModel: study.equityModel,
@@ -389,12 +433,87 @@ export function summarizeHrcStudy(study: HrcStudyImport): HrcImportSummary {
     anteType: study.anteType,
     sourceNodeCount: study.sourceNodes.length,
     preflopNodeCount: study.sourceNodes.filter((node) => node.street === 0).length,
-    nodeCount: study.nodes.length,
+    nodeCount: study.nodes.filter((node) => node.decisionEligible).length,
     storedHandClassCount: study.nodes.reduce((total, node) => total + node.hands.length, 0),
-    eligibleTrainingHandClassCount: study.nodes.reduce((total, node) => total + node.hands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length, 0),
+    eligibleTrainingHandClassCount: study.nodes.reduce((total, node) => total + (node.decisionEligible ? node.hands.filter((hand) => Number(hand.metadata.hrcWeight) >= 0.01).length : 0), 0),
     counts,
     ignoredCount: Object.values(study.ignoredNodes).reduce((total, count) => total + count, 0),
     ignoredNodes: study.ignoredNodes,
+    capabilities: study.capabilities.map((item) => item.capability),
+    sourceHandClassCount: study.sourceNodes.reduce((total, node) => total + node.hands.length, 0),
+  };
+}
+
+export type FullHandPreflopAnalysis = {
+  compatible: boolean;
+  rootSourceNodeId: string | null;
+  reachableNodeCount: number;
+  terminalCount: number;
+  eligibleHeroPlayers: number[];
+  reasons: string[];
+};
+
+/**
+ * Valida a árvore pelo conteúdo exportado: root único, referências resolvíveis,
+ * estratégias por mão e ao menos um caminho terminal. O nome do ZIP não participa.
+ */
+export function analyzeFullHandPreflop(sourceNodes: HrcSourceTreeNode[], playersCount: number): FullHandPreflopAnalysis {
+  const preflop = sourceNodes.filter((node) => node.street === 0);
+  const roots = preflop.filter((node) => node.sequence.length === 0 && node.player >= 0 && node.actions.length > 0);
+  const reasons: string[] = [];
+  if (roots.length !== 1) reasons.push("ROOT_NOT_UNIQUE");
+  const root = roots[0] ?? null;
+  const byReference = new Map<string, HrcSourceTreeNode | null>();
+  for (const node of sourceNodes) {
+    for (const reference of [node.sourceNodeId, node.sourcePath]) {
+      const normalized = normalizeHrcNodeReference(reference);
+      if (!normalized) continue;
+      const existing = byReference.get(normalized);
+      byReference.set(normalized, existing === undefined || existing === node ? node : null);
+    }
+  }
+
+  const reachable = new Set<HrcSourceTreeNode>();
+  const pending = root ? [root] : [];
+  let terminalCount = 0;
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (reachable.has(node)) continue;
+    reachable.add(node);
+    if (node.actions.length > 0 && (node.player < 0 || node.player >= playersCount)) reasons.push("ACTING_PLAYER_INVALID");
+    if (node.actions.length > 1 && !node.trainingNodeKey && node.hands.length !== 169) reasons.push("STRATEGY_MISSING");
+    if (node.actions.length === 0) terminalCount++;
+    for (const action of node.actions) {
+      if (action.node === undefined) {
+        terminalCount++;
+        continue;
+      }
+      const child = byReference.get(normalizeHrcNodeReference(action.node) ?? "");
+      if (!child) {
+        reasons.push("CHILD_UNRESOLVED");
+        continue;
+      }
+      if (child.street === 0) pending.push(child);
+      else terminalCount++;
+    }
+  }
+  if (reachable.size !== preflop.length) reasons.push("UNREACHABLE_PREFLOP_NODE");
+  if (terminalCount === 0) reasons.push("TERMINAL_MISSING");
+
+  const eligibleHeroPlayers = Array.from({ length: playersCount }, (_, player) => player)
+    .filter((player) => {
+      const decisions = [...reachable].filter((node) => node.player === player && node.actions.length > 1);
+      return decisions.length > 0 && decisions.every((node) => node.trainingNodeKey !== null);
+    });
+  if (eligibleHeroPlayers.length === 0) reasons.push("HERO_DECISIONS_NOT_TRAINABLE");
+
+  return {
+    compatible: reasons.length === 0,
+    rootSourceNodeId: root?.sourceNodeId ?? null,
+    reachableNodeCount: reachable.size,
+    terminalCount,
+    eligibleHeroPlayers,
+    reasons: [...new Set(reasons)],
   };
 }
 
@@ -664,7 +783,7 @@ function toTrainingAction(
   context: HrcPreflopContext,
   bigBlind: number,
   positions: string[],
-  _trainingType: TrainingType,
+  _trainingType: TrainingType | null,
   actingPlayer = node.player,
   sequenceAction = false,
 ): TrainingAction {

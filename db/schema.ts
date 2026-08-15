@@ -106,7 +106,8 @@ export const trainingNodes = pgTable("training_nodes", {
   id: uuid("id").primaryKey(),
   trainingSetId: uuid("training_set_id").notNull().references(() => trainingSets.id, { onDelete: "cascade" }),
   nodeKey: text("node_key").notNull(),
-  trainingType: trainingType("training_type").notNull(),
+  trainingType: trainingType("training_type"),
+  decisionEligible: boolean("decision_eligible").notNull().default(true),
   heroPosition: text("hero_position").notNull(),
   heroStackBb: doublePrecision("hero_stack_bb").notNull(),
   villainPosition: text("villain_position"),
@@ -133,6 +134,17 @@ export const trainingHands = pgTable("training_hands", {
 }, (table) => [
   uniqueIndex("training_hands_node_class_unique").on(table.trainingNodeId, table.handClass),
   index("training_hands_node_id_idx").on(table.trainingNodeId),
+]);
+
+/** Capacidades derivadas do conteúdo real do estudo, nunca do nome do arquivo. */
+export const studyCapabilities = pgTable("study_capabilities", {
+  id: uuid("id").primaryKey(),
+  trainingSetId: uuid("training_set_id").notNull().references(() => trainingSets.id, { onDelete: "cascade" }),
+  capability: text("capability").notNull(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+}, (table) => [
+  uniqueIndex("study_capabilities_set_capability_unique").on(table.trainingSetId, table.capability),
+  index("study_capabilities_capability_idx").on(table.capability),
 ]);
 
 /**
@@ -174,6 +186,24 @@ export const hrcSourceEdges = pgTable("hrc_source_edges", {
   check("hrc_source_edges_action_index_check", sql`${table.actionIndex} >= 0`),
 ]);
 
+/**
+ * Estratégias que não possuem representação em training_hands. Nodes treináveis
+ * continuam reutilizando training_hands para que a importação não duplique dados.
+ */
+export const hrcSourceHands = pgTable("hrc_source_hands", {
+  id: uuid("id").primaryKey(),
+  sourceNodeId: uuid("source_node_id").notNull().references(() => hrcSourceNodes.id, { onDelete: "cascade" }),
+  handClass: text("hand_class").notNull(),
+  strategy: jsonb("strategy").$type<Record<string, number>>().notNull(),
+  evs: jsonb("evs").$type<Record<string, number>>().notNull(),
+  weight: doublePrecision("weight").notNull(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+}, (table) => [
+  uniqueIndex("hrc_source_hands_node_class_unique").on(table.sourceNodeId, table.handClass),
+  index("hrc_source_hands_node_id_idx").on(table.sourceNodeId),
+  check("hrc_source_hands_weight_check", sql`${table.weight} >= 0 AND ${table.weight} <= 1`),
+]);
+
 export const trainingSessions = pgTable("training_sessions", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
@@ -187,9 +217,23 @@ export const trainingSessions = pgTable("training_sessions", {
   villainPosition: text("villain_position"),
   correctAnswers: integer("correct_answers").notNull().default(0),
   answeredQuestions: integer("answered_questions").notNull().default(0),
+  completedHands: integer("completed_hands").notNull().default(0),
   targetQuestions: integer("target_questions"),
   exerciseQueue: jsonb("exercise_queue").$type<Array<{ trainingSetId: string; trainingNodeId: string; trainingHandId: string }>>().notNull().default([]),
   queuePosition: integer("queue_position").notNull().default(0),
+  fullHandState: jsonb("full_hand_state").$type<{
+    version: 1;
+    rootSourceNodeId: string;
+    currentSourceNodeId: string;
+    heroPlayer: number;
+    heroHandClass: string;
+    playerHandClasses: string[];
+    actionHistory: Array<Record<string, unknown>>;
+    foldedPlayers: number[];
+    playerContributionsBb: number[];
+    potBb: number;
+    stacksBb: number[];
+  } | null>(),
   sourceSessionId: uuid("source_session_id"),
   durationSeconds: integer("duration_seconds").notNull().default(0),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
@@ -205,8 +249,9 @@ export const trainingSessions = pgTable("training_sessions", {
   index("training_sessions_source_id_idx").on(table.sourceSessionId),
   check("training_sessions_target_questions_check", sql`${table.targetQuestions} IS NULL OR (${table.targetQuestions} > 0 AND ${table.targetQuestions} <= 100)`),
   check("training_sessions_counters_check", sql`${table.answeredQuestions} >= 0 AND ${table.correctAnswers} >= 0 AND ${table.correctAnswers} <= ${table.answeredQuestions}`),
+  check("training_sessions_completed_hands_check", sql`${table.completedHands} >= 0`),
   check("training_sessions_queue_check", sql`jsonb_typeof(${table.exerciseQueue}) = 'array' AND jsonb_array_length(${table.exerciseQueue}) <= 100 AND ${table.queuePosition} >= 0 AND ((${table.endedAt} IS NULL AND jsonb_array_length(${table.exerciseQueue}) > 0 AND ${table.queuePosition} < jsonb_array_length(${table.exerciseQueue}) AND jsonb_typeof(${table.exerciseQueue} -> ${table.queuePosition}) = 'object' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingSetId') IS NOT DISTINCT FROM 'string' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingNodeId') IS NOT DISTINCT FROM 'string' AND jsonb_typeof((${table.exerciseQueue} -> ${table.queuePosition}) -> 'trainingHandId') IS NOT DISTINCT FROM 'string') OR (${table.endedAt} IS NOT NULL AND ${table.queuePosition} <= jsonb_array_length(${table.exerciseQueue})))`),
-  check("training_sessions_completion_consistency_check", sql`(((${table.endedAt} IS NULL AND ${table.completionReason} IS NULL) OR (${table.endedAt} IS NOT NULL AND ${table.completionReason} IS NOT NULL)) AND (${table.completionReason} IS DISTINCT FROM 'COMPLETED' OR (${table.targetQuestions} IS NOT NULL AND ${table.answeredQuestions} >= ${table.targetQuestions})))`),
+  check("training_sessions_completion_consistency_check", sql`(((${table.endedAt} IS NULL AND ${table.completionReason} IS NULL) OR (${table.endedAt} IS NOT NULL AND ${table.completionReason} IS NOT NULL)) AND (${table.completionReason} IS DISTINCT FROM 'COMPLETED' OR (${table.targetQuestions} IS NOT NULL AND ((${table.fullHandState} IS NOT NULL AND ${table.completedHands} >= ${table.targetQuestions}) OR (${table.fullHandState} IS NULL AND ${table.answeredQuestions} >= ${table.targetQuestions})))))`),
   check("training_sessions_summary_only_check", sql`${table.answerDetailsAvailable} = true OR (${table.endedAt} IS NOT NULL AND ${table.completionReason} = 'USER_FINISHED' AND ${table.targetQuestions} IS NULL AND ${table.exerciseQueue} = '[]'::jsonb AND ${table.queuePosition} = 0)`),
 ]);
 

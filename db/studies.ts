@@ -1,8 +1,8 @@
 import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 import type { HrcStudyImport } from "../lib/hrc-import";
-import { buildSpotSignature, isTrainingPosition, isTrainingType, type TrainingAction, type TrainingSequenceAction, type TrainingType } from "../lib/training";
+import { buildSpotSignature, isTrainingPosition, isTrainingType, type StudyCapability, type TrainingAction, type TrainingSequenceAction, type TrainingType } from "../lib/training";
 import { getDb } from "./index";
-import { hrcSourceNodes, trainingAnswers, trainingHands, trainingNodes, trainingSessions, trainingSets } from "./schema";
+import { hrcSourceNodes, studyCapabilities, trainingAnswers, trainingHands, trainingNodes, trainingSessions, trainingSets } from "./schema";
 import { persistHrcStudy } from "./study-import";
 
 export { DuplicateHrcStudyError } from "./study-import";
@@ -25,6 +25,7 @@ export type AdminStudy = {
   isPublished: boolean;
   spotCount: number;
   importedAt: number;
+  capabilities: StudyCapability[];
 };
 
 export type StudiesAdminData = {
@@ -95,7 +96,7 @@ export async function getStudiesAdminData(): Promise<StudiesAdminData> {
     anteType: trainingSets.anteType,
     status: trainingSets.status,
     isPublished: trainingSets.isPublished,
-    spotCount: sql<number>`COUNT(${trainingNodes.id})::int`,
+    spotCount: sql<number>`COUNT(${trainingNodes.id}) FILTER (WHERE ${trainingNodes.decisionEligible} = true)::int`,
     importedAt: trainingSets.importedAt,
   }).from(trainingSets)
     .leftJoin(trainingNodes, eq(trainingNodes.trainingSetId, trainingSets.id))
@@ -103,10 +104,22 @@ export async function getStudiesAdminData(): Promise<StudiesAdminData> {
     .groupBy(trainingSets.id)
     .orderBy(desc(trainingSets.importedAt), asc(trainingSets.name));
 
+  const capabilityRows = await getDb().select({
+    trainingSetId: studyCapabilities.trainingSetId,
+    capability: studyCapabilities.capability,
+  }).from(studyCapabilities);
+  const capabilitiesByStudy = new Map<string, StudyCapability[]>();
+  for (const row of capabilityRows) {
+    if (row.capability !== "DECISION" && row.capability !== "FULL_HAND_PREFLOP") continue;
+    const values = capabilitiesByStudy.get(row.trainingSetId) ?? [];
+    values.push(row.capability);
+    capabilitiesByStudy.set(row.trainingSetId, values);
+  }
   const studies: AdminStudy[] = rows.map((row) => ({
     ...row,
     anteBb: row.bigBlind > 0 ? row.ante / row.bigBlind : 0,
     importedAt: row.importedAt.getTime(),
+    capabilities: capabilitiesByStudy.get(row.id) ?? [],
   }));
   return {
     summary: {
@@ -139,21 +152,22 @@ export async function getStudyInventory(studyId: string, filters: StudyInventory
   if (!studyRow) return null;
 
   const baseCondition = eq(trainingNodes.trainingSetId, studyId);
+  const decisionCondition = and(baseCondition, eq(trainingNodes.decisionEligible, true))!;
   const [[sourceCount], [trainingCount], [storedHandClassCount], [eligibleTrainingHandClassCount], typeRows, positionRows] = await Promise.all([
     db.select({ count: sql<number>`COUNT(*)::int` }).from(hrcSourceNodes).where(eq(hrcSourceNodes.trainingSetId, studyId)),
-    db.select({ count: sql<number>`COUNT(*)::int` }).from(trainingNodes).where(baseCondition),
+    db.select({ count: sql<number>`COUNT(*)::int` }).from(trainingNodes).where(decisionCondition),
     db.select({ count: sql<number>`COUNT(*)::int` }).from(trainingHands)
-      .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId)).where(baseCondition),
+      .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId)).where(decisionCondition),
     db.select({ count: sql<number>`COUNT(*)::int` }).from(trainingHands)
       .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
-      .where(and(baseCondition, sql`COALESCE((${trainingHands.metadata}->>'hrcWeight')::double precision, 1) >= 0.01`)),
-    db.select({ trainingType: trainingNodes.trainingType, count: sql<number>`COUNT(*)::int` })
-      .from(trainingNodes).where(baseCondition).groupBy(trainingNodes.trainingType).orderBy(asc(trainingNodes.trainingType)),
+      .where(and(decisionCondition, sql`COALESCE((${trainingHands.metadata}->>'hrcWeight')::double precision, 1) >= 0.01`)),
+    db.select({ trainingType: sql<TrainingType>`${trainingNodes.trainingType}`, count: sql<number>`COUNT(*)::int` })
+      .from(trainingNodes).where(decisionCondition).groupBy(trainingNodes.trainingType).orderBy(asc(trainingNodes.trainingType)),
     db.select({ heroPosition: trainingNodes.heroPosition, count: sql<number>`COUNT(*)::int` })
-      .from(trainingNodes).where(baseCondition).groupBy(trainingNodes.heroPosition).orderBy(asc(trainingNodes.heroPosition)),
+      .from(trainingNodes).where(decisionCondition).groupBy(trainingNodes.heroPosition).orderBy(asc(trainingNodes.heroPosition)),
   ]);
 
-  const spotConditions: SQL[] = [baseCondition];
+  const spotConditions: SQL[] = [decisionCondition];
   if (filters.trainingType) spotConditions.push(eq(trainingNodes.trainingType, filters.trainingType));
   if (filters.heroPosition) spotConditions.push(eq(trainingNodes.heroPosition, filters.heroPosition));
   if (filters.search) {
@@ -220,6 +234,7 @@ export async function getStudyInventory(studyId: string, filters: StudyInventory
       const availableActions = row.availableActions as TrainingAction[];
       return {
         ...row,
+        trainingType: row.trainingType!,
         actionSequence,
         availableActions,
         signature: buildSpotSignature({ ...row, actionSequence, availableActions }),
@@ -260,11 +275,15 @@ export async function setStudyPublished(studyId: string, published: boolean) {
     if (!study) return false;
     if (published) {
       const version = Number(study.metadata.validationVersion);
-      if (![2, 3].includes(version)) throw new InvalidStoredStudyError("Reimporte o estudo com a validação HRC atual antes de publicá-lo.");
+      if (![2, 3, 4].includes(version)) throw new InvalidStoredStudyError("Reimporte o estudo com a validação HRC atual antes de publicá-lo.");
       if (study.status === "ARCHIVED") throw new InvalidStoredStudyError("Estudos arquivados não podem ser publicados.");
-      const [spot] = await tx.select({ id: trainingNodes.id }).from(trainingNodes)
-        .where(eq(trainingNodes.trainingSetId, studyId)).limit(1);
-      if (!spot) throw new InvalidStoredStudyError("O estudo não possui spots treináveis e não pode ser publicado.");
+      const [[spot], [fullHand]] = await Promise.all([
+        tx.select({ id: trainingNodes.id }).from(trainingNodes)
+          .where(and(eq(trainingNodes.trainingSetId, studyId), eq(trainingNodes.decisionEligible, true))).limit(1),
+        tx.select({ id: studyCapabilities.id }).from(studyCapabilities)
+          .where(and(eq(studyCapabilities.trainingSetId, studyId), eq(studyCapabilities.capability, "FULL_HAND_PREFLOP"))).limit(1),
+      ]);
+      if (!spot && !fullHand) throw new InvalidStoredStudyError("O estudo não possui modos de treinamento compatíveis e não pode ser publicado.");
     }
     await tx.update(trainingSets).set({
       status: published ? "PUBLISHED" : "IMPORTED",

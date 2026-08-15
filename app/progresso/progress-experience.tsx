@@ -76,7 +76,7 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
           <div><div className="progress-title"><LineIcon name="target" /><h2 id="weak-title">Pontos fracos</h2></div><p>Priorize estes spots para ganhar mais consistência.</p></div>
         </div>
         {data.weakSpots.length ? <div className="weak-list">{data.weakSpots.map((spot) => <article key={spot.key}>
-          <div><b>{trainingTypeLabels[spot.trainingType]}</b><span>{spot.label} · {numberFormatter.format(spot.hands)} mãos</span></div>
+          <div><b>{spot.trainingType ? trainingTypeLabels[spot.trainingType] : "Mão completa"}</b><span>{spot.label} · {numberFormatter.format(spot.hands)} mãos</span></div>
           <strong className={accuracyTone(spot.accuracy)}>{spot.accuracy}%</strong>
           <button type="button" disabled title="O treino direto deste agrupamento ainda não está disponível.">Treinar agora</button>
         </article>)}</div> : <ProgressEmpty compact title="Ainda não há decisões suficientes para identificar padrões." detail="Um ponto fraco exige pelo menos 5 decisões comparáveis." />}

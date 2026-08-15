@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AuthUser } from "../db/auth";
 import AppHeader from "../components/ui/AppHeader";
 import { Button } from "../components/ui/Button";
@@ -10,6 +10,7 @@ import { PageContainer, SegmentedControl, StatusMessage } from "../components/ui
 import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import { RangeMatrix } from "../components/training/RangeMatrix";
 import { displayTrainingPosition, sequenceActionLabel } from "../components/training/trainingPresentation";
+import { startAutoAdvanceTimer, type AutoAdvanceTimer } from "../lib/auto-advance";
 import {
   EQUITY_MODELS,
   QUESTION_COUNTS,
@@ -25,6 +26,7 @@ import {
   trainingViewModeFromPresentation,
   type TrainingAction,
   type AnswerEvaluation,
+  type TrainingChoiceGrade,
   type TrainingConfig,
   type TrainingExercise,
   type TrainingFilters,
@@ -36,8 +38,9 @@ import {
   type TrainingType,
 } from "../lib/training";
 
-const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false, tableContext: null };
+const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false, tableContext: null, fullHandStages: [] };
 const ACTIVE_TRAINING_VIEW_MODE: TrainingViewMode = "quick-decision";
+const AUTO_ADVANCE_PREFERENCE_KEY = "rangelab:training:auto-advance";
 
 type PendingSpotFeedback = {
   answer: AnswerEvaluation;
@@ -47,6 +50,7 @@ type PendingSpotFeedback = {
 };
 
 export function TrainingSetup({ preferredType, initialFilters, initialTargetQuestions = 50, initialViewMode = ACTIVE_TRAINING_VIEW_MODE, onClose, onStarted, embedded = false }: { preferredType?: TrainingType; initialFilters?: TrainingFilters; initialTargetQuestions?: TrainingConfig["targetQuestions"]; initialViewMode?: TrainingViewMode; onClose?: () => void; onStarted: (session: TrainingSession) => void; embedded?: boolean }) {
+  const [viewMode, setViewMode] = useState<TrainingViewMode>(initialViewMode);
   const [filters, setFilters] = useState<TrainingFilters>(initialFilters ?? { trainingType: preferredType });
   const [targetQuestions, setTargetQuestions] = useState<TrainingConfig["targetQuestions"]>(initialTargetQuestions);
   const [options, setOptions] = useState(EMPTY_OPTIONS);
@@ -79,7 +83,16 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
     return () => controller.abort();
   }, [filterQuery]);
 
-  const config = buildConfig(filters, targetQuestions, options.hasMatches, false, initialViewMode);
+  const selectedFullHandStage = options.fullHandStages[0] ?? null;
+  const config = viewMode === "full-hand"
+    ? selectedFullHandStage ? {
+      trainingType: null,
+      equityModel: selectedFullHandStage.equityModel,
+      targetQuestions,
+      presentationMode: "FROM_START" as const,
+      fullHandStage: selectedFullHandStage.stage,
+    } : null
+    : buildConfig(filters, targetQuestions, options.hasMatches, false, viewMode);
   const noStudies = !loading && options.trainingTypes.length === 0;
 
   async function start() {
@@ -100,8 +113,8 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
 
   const panel = <section className={`setup-card training-setup-card simplified-setup ${embedded ? "training-setup-embedded" : ""}`} role={embedded ? "region" : undefined} aria-labelledby="setup-title">
       <div className="setup-heading"><span>CONFIGURAÇÃO DO TREINO</span><h2 id="setup-title">Prepare sua sessão</h2><p id="setup-description">Escolha o foco e o modelo. Os estudos publicados definem as mãos disponíveis.</p></div>
-      <TrainingModeSelector value={initialViewMode}/>
-      <div className="setup-group"><span className="setup-label" id="training-type-label">Tipo de treinamento</span><div className="training-type-grid" role="group" aria-labelledby="training-type-label">{TRAINING_TYPES.map((type) => {
+      <TrainingModeSelector value={viewMode} onChange={setViewMode}/>
+      {viewMode === "quick-decision" ? <><div className="setup-group"><span className="setup-label" id="training-type-label">Tipo de treinamento</span><div className="training-type-grid" role="group" aria-labelledby="training-type-label">{TRAINING_TYPES.map((type) => {
         const available = options.trainingTypes.includes(type);
         return <button key={type} type="button" disabled={!available || loading} className={filters.trainingType === type ? "selected" : ""} onClick={() => setFilters({ trainingType: type })}>
           <b>{trainingTypeLabels[type]}</b><small>{trainingTypeDescriptions[type]}</small>{!loading && !available && <i>Sem estudo</i>}
@@ -116,7 +129,13 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
           <SelectField id="training-stack" label="Stack efetivo" value={filters.stackDepthBb ?? ""} disabled={!filters.equityModel || !options.stackDepthsBb.length} onChange={(value) => setFilters((current) => ({ ...current, stackDepthBb: value ? Number(value) : undefined, heroPosition: undefined }))} options={[{ value: "", label: "Todas" }, ...options.stackDepthsBb.map((stack) => ({ value: stack, label: `${formatBb(stack)} BB` }))]}/>
           <SelectField id="training-position" label="Posição do Hero" value={filters.heroPosition ?? ""} disabled={!filters.equityModel || !options.heroPositions.length} onChange={(value) => setFilters((current) => ({ ...current, heroPosition: value || undefined }))} options={[{ value: "", label: "Todas" }, ...options.heroPositions.map(asOption)]}/>
         </div>
-      </>}
+      </>}</> : <div className="setup-group">
+        <span className="setup-label" id="full-hand-advanced-study-label">Estudo</span>
+        {selectedFullHandStage
+          ? <div className="choice-grid compact" role="group" aria-labelledby="full-hand-advanced-study-label"><button type="button" className="selected" aria-pressed="true">{selectedFullHandStage.label}</button></div>
+          : <div className="setup-empty">Nenhum estudo de mão completa disponível.</div>}
+        <SelectField id="full-hand-count" label="Quantidade de mãos" value={targetQuestions ?? "FREE"} disabled={false} onChange={(value) => setTargetQuestions(value === "FREE" ? null : Number(value) as TrainingConfig["targetQuestions"])} options={[...QUESTION_COUNTS.map((count) => ({ value: count, label: `${count} mãos` })), { value: "FREE", label: "Treino livre" }]}/>
+      </div>}
       {error && <StatusMessage className="setup-status" tone="error">{error}</StatusMessage>}
       <Button className="training-start-system" type="button" size="lg" fullWidth loading={starting} disabled={!config || loading} onClick={start}>Começar treinamento<Icon name="play"/></Button>
     </section>;
@@ -135,6 +154,7 @@ const QUICK_PREFLOP_ACTIONS: Array<{ id: string; label: string; type?: TrainingT
 ];
 
 export function TrainingQuickSetup({ onStarted }: { onStarted: (session: TrainingSession) => void }) {
+  const [viewMode, setViewMode] = useState<TrainingViewMode>(ACTIVE_TRAINING_VIEW_MODE);
   const [filters, setFilters] = useState<TrainingFilters>({});
   const [options, setOptions] = useState(EMPTY_OPTIONS);
   const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
@@ -171,10 +191,23 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
     return () => controller.abort();
   }, [filterQuery]);
 
-  const config = buildConfig(filters, targetQuestions, options.hasMatches, true, ACTIVE_TRAINING_VIEW_MODE);
-  const modelLabel = options.tableContext
-    ? `${gameTypeLabels[options.tableContext.gameType]} • ${equityModelLabels[options.tableContext.equityModel]}`
-    : "Nenhum modelo disponível";
+  const selectedFullHandStage = options.fullHandStages[0] ?? null;
+  const config = viewMode === "full-hand"
+    ? selectedFullHandStage ? {
+      trainingType: null,
+      equityModel: selectedFullHandStage.equityModel,
+      targetQuestions,
+      presentationMode: "FROM_START" as const,
+      fullHandStage: selectedFullHandStage.stage,
+    } : null
+    : buildConfig(filters, targetQuestions, options.hasMatches, true, viewMode);
+  const modelLabel = viewMode === "full-hand"
+    ? selectedFullHandStage
+      ? `${gameTypeLabels.TOURNAMENT} • ${equityModelLabels[selectedFullHandStage.equityModel]}`
+      : "Nenhum modelo disponível"
+    : options.tableContext
+      ? `${gameTypeLabels[options.tableContext.gameType]} • ${equityModelLabels[options.tableContext.equityModel]}`
+      : "Nenhum modelo disponível";
 
   function cycleModel() {
     if (options.equityModels.length < 2) return;
@@ -206,11 +239,11 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
     <section className="training-quick-setup" aria-label="Configuração rápida do treino">
       <div className="quick-setup-group quick-solution">
         <span className="quick-label">Modelo</span>
-        <div><button type="button" disabled={!options.tableContext || loading} onClick={cycleModel} aria-label={`Modelo ${modelLabel}`} title={options.tableContext?.studyName}>{modelLabel}</button><Button type="button" className="quick-settings-icon" variant="ghost" size="sm" iconOnly aria-label="Abrir todas as configurações" onClick={() => setAdvancedOpen(true)}><Icon name="settings"/></Button></div>
+        <div><button type="button" disabled={viewMode === "full-hand" || !options.tableContext || loading} onClick={cycleModel} aria-label={`Modelo ${modelLabel}`} title={viewMode === "full-hand" ? "Modelo definido pelo estudo de mão completa" : options.tableContext?.studyName}>{modelLabel}</button></div>
       </div>
-      <TrainingModeSelector compact value={ACTIVE_TRAINING_VIEW_MODE}/>
-      <div className="quick-setup-group quick-preflop-action">
-        <span className="quick-label" id="preflop-action-label">Ação pré-flop <small title="Situação enfrentada pelo Hero" aria-label="Ajuda: situação enfrentada pelo Hero">?</small></span>
+      <TrainingModeSelector compact value={viewMode} onChange={setViewMode}/>
+      {viewMode === "quick-decision" ? <div className="quick-setup-group quick-preflop-action">
+        <span className="quick-label" id="preflop-action-label">Ação</span>
         <div role="group" aria-labelledby="preflop-action-label">{QUICK_PREFLOP_ACTIONS.map((item) => {
           const isAny = item.id === "ANY";
           const available = isAny ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
@@ -223,7 +256,12 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
             }
           }}>{item.label}</button>;
         })}</div>
-      </div>
+      </div> : <div className={`quick-setup-group quick-preflop-action${options.fullHandStages.length === 1 ? " quick-single-study" : ""}`}>
+        <span className="quick-label" id="full-hand-study-label">Estudo</span>
+        {selectedFullHandStage
+          ? <div role="group" aria-labelledby="full-hand-study-label"><button type="button" className="selected" aria-pressed="true">{selectedFullHandStage.label}</button></div>
+          : <div className="quick-empty-studies" role="status">Nenhum estudo de mão completa disponível.</div>}
+      </div>}
       {error && <StatusMessage className="quick-setup-error" tone="error">{error}</StatusMessage>}
       {!loading && !options.hasMatches && !error && <div className="quick-empty-studies">Importe um estudo para iniciar um treinamento.</div>}
       <div className="quick-setup-actions"><Button type="button" className="quick-all-settings" variant="ghost" onClick={() => setAdvancedOpen(true)}><Icon name="settings"/>Todas as configurações</Button><Button type="button" className="quick-start-training" loading={starting} disabled={!config || loading} onClick={start}><Icon name="play"/>Iniciar treino</Button></div>
@@ -231,17 +269,17 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
     {advancedOpen && <TrainingSetup
       initialFilters={filters}
       initialTargetQuestions={targetQuestions}
-      initialViewMode={ACTIVE_TRAINING_VIEW_MODE}
+      initialViewMode={viewMode}
       onClose={() => setAdvancedOpen(false)}
       onStarted={(session) => { setAdvancedOpen(false); onStarted(session); }}
     />}
   </>;
 }
 
-function TrainingModeSelector({ compact = false, value }: { compact?: boolean; value: TrainingViewMode }) {
+function TrainingModeSelector({ compact = false, value, onChange }: { compact?: boolean; value: TrainingViewMode; onChange?: (value: TrainingViewMode) => void }) {
   return <div className={compact ? "quick-setup-group quick-training-mode" : "setup-experience-switch"}>
     <span className="quick-label">Modo de treino</span>
-    <SegmentedControl className="training-mode-segmented" label="Modo de treino" value={value} onChange={() => undefined} options={[{ value: "quick-decision", label: "Decisão" }, { value: "full-hand", label: "Mão completa", disabled: true }] as const}/>
+    <SegmentedControl className="training-mode-segmented" label="Modo de treino" value={value} onChange={(next) => onChange?.(next as TrainingViewMode)} options={[{ value: "quick-decision", label: "Decisão" }, { value: "full-hand", label: "Mão completa" }] as const}/>
   </div>;
 }
 
@@ -249,18 +287,98 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
   const [exercise, setExercise] = useState(session.exercise);
   const [answeredQuestions, setAnsweredQuestions] = useState(session.answeredQuestions);
   const [correctAnswers, setCorrectAnswers] = useState(session.correctAnswers);
+  const [completedHands, setCompletedHands] = useState(session.completedHands);
   const [feedback, setFeedback] = useState<PendingSpotFeedback | null>(null);
   const [retryContext, setRetryContext] = useState<PendingSpotFeedback | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replayAttempt, setReplayAttempt] = useState(0);
+  const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState(true);
+  const [autoAdvanceReady, setAutoAdvanceReady] = useState(false);
+  const [autoAdvancePaused, setAutoAdvancePaused] = useState(false);
+  const [autoAdvanceCountdown, setAutoAdvanceCountdown] = useState<number | null>(null);
+  const [advancing, setAdvancing] = useState(false);
   const [elapsed, setElapsed] = useState(() => Math.max(0, Math.round((Date.now() - session.startedAt) / 1000)));
+  const autoAdvanceTimerRef = useRef<AutoAdvanceTimer | null>(null);
+  const advanceLockRef = useRef(false);
   const viewMode = trainingViewModeFromPresentation(session.config.presentationMode);
+
+  const stopAutoAdvance = useCallback(() => {
+    autoAdvanceTimerRef.current?.cancel();
+    autoAdvanceTimerRef.current = null;
+    setAutoAdvanceCountdown(null);
+  }, []);
+
+  const advanceSpot = useCallback(() => {
+    if (!feedback || advanceLockRef.current) return;
+    advanceLockRef.current = true;
+    setAdvancing(true);
+    stopAutoAdvance();
+    if (feedback.report) {
+      onReport(feedback.report);
+      return;
+    }
+    if (!feedback.nextExercise) {
+      advanceLockRef.current = false;
+      setAdvancing(false);
+      return;
+    }
+    setExercise(feedback.nextExercise);
+    setFeedback(null);
+    setRetryContext(null);
+    setError("");
+  }, [feedback, onReport, stopAutoAdvance]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setElapsed(Math.max(0, Math.round((Date.now() - session.startedAt) / 1000))), 1000);
     return () => window.clearInterval(timer);
   }, [session.startedAt]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        setAutoAdvanceEnabled(window.localStorage.getItem(AUTO_ADVANCE_PREFERENCE_KEY) !== "false");
+      } catch {
+        setAutoAdvanceEnabled(true);
+      }
+      setAutoAdvanceReady(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!autoAdvanceReady || !autoAdvanceEnabled || !feedback || busy || autoAdvancePaused || feedback.answer.isMixed) {
+      autoAdvanceTimerRef.current?.cancel();
+      autoAdvanceTimerRef.current = null;
+      return;
+    }
+    autoAdvanceTimerRef.current?.cancel();
+    autoAdvanceTimerRef.current = startAutoAdvanceTimer({
+      onTick: setAutoAdvanceCountdown,
+      onElapsed: advanceSpot,
+    });
+    return () => {
+      autoAdvanceTimerRef.current?.cancel();
+      autoAdvanceTimerRef.current = null;
+    };
+  }, [advanceSpot, autoAdvanceEnabled, autoAdvancePaused, autoAdvanceReady, busy, feedback]);
+
+  function updateAutoAdvancePreference(enabled: boolean) {
+    stopAutoAdvance();
+    setAutoAdvanceEnabled(enabled);
+    setAutoAdvancePaused(false);
+    try {
+      window.localStorage.setItem(AUTO_ADVANCE_PREFERENCE_KEY, String(enabled));
+    } catch {
+      // The preference remains active for this session when storage is unavailable.
+    }
+  }
+
+  function pauseAutoAdvance() {
+    if (!feedback) return;
+    setAutoAdvancePaused(true);
+    stopAutoAdvance();
+  }
 
   async function choose(selected: TrainingAction) {
     if (busy || feedback) return;
@@ -281,6 +399,9 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
           bestLabel: retry.bestLabel,
         },
       });
+      advanceLockRef.current = false;
+      setAdvancing(false);
+      setAutoAdvancePaused(false);
       setRetryContext(null);
       return;
     }
@@ -288,13 +409,17 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     setError("");
     try {
       const response = await fetch("/api/training/session", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "ANSWER", sessionId: session.id, questionIndex: answeredQuestions, trainingNodeId: exercise.trainingNodeId, trainingHandId: exercise.trainingHandId, selectedAction: actionKey(selected) }) });
-      const data = await response.json() as { answer: AnswerEvaluation; answeredQuestions: number; correctAnswers: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
+      const data = await response.json() as { answer: AnswerEvaluation; answeredQuestions: number; correctAnswers: number; completedHands: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
       if (!response.ok) throw new Error(data.error || "Não foi possível salvar a resposta.");
       setAnsweredQuestions(data.answeredQuestions);
       setCorrectAnswers(data.correctAnswers);
+      setCompletedHands(data.completedHands);
       if (!data.answer || (!data.report && !data.nextExercise)) {
         throw new Error("Não foi possível carregar o próximo spot.");
       }
+      advanceLockRef.current = false;
+      setAdvancing(false);
+      setAutoAdvancePaused(false);
       setFeedback({ answer: data.answer, selectedKey: actionKey(selected), nextExercise: data.nextExercise, report: data.report });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível salvar a resposta.");
@@ -305,27 +430,21 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
 
   function repeatSpot() {
     if (!feedback) return;
+    advanceLockRef.current = true;
+    setAdvancing(false);
+    setAutoAdvancePaused(true);
+    stopAutoAdvance();
     setRetryContext(feedback);
     setFeedback(null);
     setError("");
     setReplayAttempt((current) => nextReplayAttempt(current, viewMode));
   }
 
-  function advanceSpot() {
-    if (!feedback) return;
-    if (feedback.report) {
-      onReport(feedback.report);
-      return;
-    }
-    if (!feedback.nextExercise) return;
-    setExercise(feedback.nextExercise);
-    setFeedback(null);
-    setRetryContext(null);
-    setError("");
-  }
-
   async function finish() {
     if (busy) return;
+    advanceLockRef.current = true;
+    setAutoAdvancePaused(true);
+    stopAutoAdvance();
     if (feedback?.report) {
       onReport(feedback.report);
       return;
@@ -340,11 +459,15 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível finalizar o treino.");
     } finally {
+      advanceLockRef.current = false;
+      setAdvancing(false);
       setBusy(false);
     }
   }
 
-  const currentHand = feedback || retryContext ? answeredQuestions : answeredQuestions + 1;
+  const currentHand = viewMode === "full-hand"
+    ? Math.min(completedHands + 1, session.targetQuestions ?? completedHands + 1)
+    : feedback || retryContext ? answeredQuestions : answeredQuestions + 1;
   const progress = session.targetQuestions ? `${Math.min(currentHand, session.targetQuestions)} / ${session.targetQuestions}` : `${currentHand}`;
   const errors = Math.max(0, answeredQuestions - correctAnswers);
   const accuracy = answeredQuestions > 0 ? Math.round((correctAnswers / answeredQuestions) * 100) : null;
@@ -361,6 +484,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
         <div><span>Erros</span><b className={errors > 0 ? "is-negative" : ""}>{errors}</b></div>
       </div>
       <div className="spot-session-time"><span aria-label="Tempo de treino">Tempo<span className="spot-session-time-detail"> de treino</span></span><b>{formatDuration(elapsed)}</b></div>
+      <label className="spot-auto-advance-setting"><input type="checkbox" checked={autoAdvanceEnabled} aria-label="Avançar automaticamente" onChange={(event) => updateAutoAdvancePreference(event.currentTarget.checked)}/><i aria-hidden="true"/><span>Avançar automaticamente</span></label>
       <Button type="button" className="spot-finish-system" variant="danger" size="sm" loading={busy} onClick={finish}><Icon name="logout"/>Finalizar treino</Button>
     </aside>
     <div className="spot-session-main">
@@ -370,9 +494,15 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
         busy={busy}
         feedback={feedback}
         nextLabel={feedback?.report ? "Ver análise final" : "Próximo spot"}
+        nextCompactLabel={feedback?.report ? "Ver análise" : "Próximo"}
+        nextCountdown={autoAdvanceCountdown}
+        nextAutoAdvanceActive={autoAdvanceCountdown !== null}
+        nextDisabled={busy || advancing}
+        nextAriaLabel={autoAdvanceCountdown !== null ? `${feedback?.report ? "Ver análise final" : "Próximo spot"} automaticamente em ${autoAdvanceCountdown} ${autoAdvanceCountdown === 1 ? "segundo" : "segundos"}` : feedback?.report ? "Ver análise final" : "Próximo spot"}
         onChoose={choose}
         onRepeat={repeatSpot}
         onNext={advanceSpot}
+        onFeedbackInteraction={pauseAutoAdvance}
         viewMode={viewMode}
       />
       {error && <StatusMessage className="trainer-error" tone="error">{error}</StatusMessage>}
@@ -437,7 +567,7 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
         <header className="report-minimal-summary">
           <span>Resultado do treino</span>
           <p><strong>{report.accuracy}% de acerto</strong><i>·</i><b>{report.correctAnswers} corretas</b><i>·</i><b>{report.errors} erro{report.errors === 1 ? "" : "s"}</b><i>·</i><b className={report.evDelta !== null && report.evDelta < 0 ? "is-negative" : ""}>{reportEv}</b><i>·</i><b>{formatDuration(report.durationSeconds)}</b></p>
-          <small>{report.trainingType === null ? "Todos os spots" : trainingTypeLabels[report.trainingType]} · {equityModelLabels[report.equityModel]} · {report.stackDepthBb === null ? "Stacks variados" : `${formatBb(report.stackDepthBb)} BB`} · {report.heroPosition === null ? "Todas as posições" : report.heroPosition}</small>
+          <small>{report.presentationMode === "FROM_START" ? "Mão completa — Pré-flop" : report.trainingType === null ? "Todos os spots" : trainingTypeLabels[report.trainingType]} · {equityModelLabels[report.equityModel]} · {report.stackDepthBb === null ? "Stacks variados" : `${formatBb(report.stackDepthBb)} BB`} · {report.heroPosition === null ? "Todas as posições" : report.heroPosition}</small>
         </header>
         <div className="report-actions report-actions-top">
           <Button type="button" size="sm" variant="secondary" loading={starting === "REPEAT"} disabled={starting !== null && starting !== "REPEAT"} onClick={() => start("REPEAT")}><Icon name="refresh"/>Treinar novamente</Button>
@@ -453,7 +583,7 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
           <b>{selectedSpot ? displayTrainingPosition(selectedSpot.exercise.heroPosition, selectedSpot.exercise.playersCount) : selectedDetail.heroPosition}{selectedSpot ? ` · ${formatBb(selectedSpot.exercise.heroStackBb)} BB` : ""}</b>
           <small>{selectedSpot ? reportSpotSequence(selectedSpot.exercise) : rangeLoading ? "Carregando contexto do spot…" : "Contexto do spot indisponível"}</small>
         </div>
-        <div className="report-selected-decision"><b>{selectedDetail.handClass}</b><span>{reportActionLabel(selectedDetail.selectedAction)} → {reportActionLabel(selectedDetail.bestAction)}</span></div>
+        <div className="report-selected-decision"><b>{selectedDetail.handClass}</b><span>{reportActionLabel(selectedDetail.selectedAction)} · {reportGradeLabel(selectedDetail.grade)}{selectedDetail.isMixed ? " · Mix" : ""}{selectedDetail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(selectedDetail.selectedFrequencyPercent)}% GTO` : ""} · mais frequente: {reportActionLabel(selectedDetail.dominantAction)}</span></div>
       </div>}
 
       {report.decisionDetails.length > 0 && <div className="report-analysis-workspace">
@@ -463,8 +593,8 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
         </section>
         <aside className="report-decision-browser" aria-label="Decisões da sessão">
           <header><h2>Decisões da sessão</h2><b>{report.decisionDetails.length}</b></header>
-          <div>{report.decisionDetails.map((detail) => <button type="button" key={detail.questionIndex} className={`${detail.questionIndex === selectedQuestion ? "selected" : ""} ${detail.isCorrect ? "correct" : "incorrect"}`} aria-pressed={detail.questionIndex === selectedQuestion} onClick={() => selectReportQuestion(detail.questionIndex)}>
-            <span>#{detail.questionIndex + 1}</span><b>{detail.handClass}</b><i>{detail.heroPosition}</i><small>{reportActionLabel(detail.selectedAction)} → {reportActionLabel(detail.bestAction)}</small><strong>{detail.isCorrect ? "Correta" : "Revisar"}</strong>
+          <div>{report.decisionDetails.map((detail) => <button type="button" key={detail.questionIndex} className={`${detail.questionIndex === selectedQuestion ? "selected" : ""} grade-${detail.grade.toLowerCase()}`} aria-pressed={detail.questionIndex === selectedQuestion} onClick={() => selectReportQuestion(detail.questionIndex)}>
+            <span>#{detail.questionIndex + 1}</span><b>{detail.handClass}</b><i>{detail.heroPosition}</i><small>{reportActionLabel(detail.selectedAction)}{detail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(detail.selectedFrequencyPercent)}%` : ""}</small><strong>{reportGradeIcon(detail.grade)} {reportGradeLabel(detail.grade)}{detail.isMixed ? " · Mix" : ""}</strong>
           </button>)}</div>
         </aside>
       </div>}
@@ -518,6 +648,24 @@ function normalizeFilters(current: TrainingFilters, options: TrainingOptions): T
 function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["targetQuestions"], hasMatches: boolean, allowAny = false, viewMode: TrainingViewMode = "quick-decision"): TrainingConfig | null {
   if (!hasMatches || (!allowAny && !filters.trainingType) || !filters.equityModel) return null;
   return { trainingType: filters.trainingType ?? null, equityModel: filters.equityModel, stackDepthBb: filters.stackDepthBb, heroPosition: filters.heroPosition, targetQuestions, presentationMode: trainingPresentationModeFromView(viewMode) };
+}
+
+function reportGradeIcon(grade: TrainingChoiceGrade) {
+  if (grade === "BEST") return "✓✓";
+  if (grade === "CORRECT") return "✓";
+  if (grade === "INACCURACY") return "!";
+  return "×";
+}
+
+function reportGradeLabel(grade: TrainingChoiceGrade) {
+  if (grade === "BEST") return "Melhor";
+  if (grade === "CORRECT") return "Correta";
+  if (grade === "INACCURACY") return "Imprecisão";
+  return "Errada";
+}
+
+function formatReportFrequency(value: number) {
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(value);
 }
 
 export function nextReplayAttempt(current: number, viewMode: TrainingViewMode) {

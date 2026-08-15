@@ -74,20 +74,26 @@ test("review final oferece repetir e próxima mão por street", () => {
     winnerLabel: "Hero vence",
     handLabel: "Par de Valetes",
     score: 86,
+    evDeltaBb: -0.04,
     wonPotBb: 24.5,
     showdown: true,
     reviews: [
-      { street: "PREFLOP" as const, status: "CORRECT" as const },
+      { street: "PREFLOP" as const, status: "BEST" as const },
       { street: "FLOP" as const, status: "CORRECT" as const },
-      { street: "TURN" as const, status: "REVIEW" as const },
-      { street: "RIVER" as const, status: "CORRECT" as const },
+      { street: "TURN" as const, status: "INACCURACY" as const },
+      { street: "RIVER" as const, status: "NOT_PLAYED" as const },
     ],
   };
   const html = renderToStaticMarkup(createElement(HandResult, { result, onRepeat: () => undefined, onNext: () => undefined }));
   assert.match(html, /MÃO CONCLUÍDA/);
   assert.match(html, /Pré-flop/);
-  assert.match(html, /River/);
+  assert.match(html, /<span>Pré-flop<\/span><b>✓✓<\/b>/);
+  assert.match(html, /<span>Flop<\/span><b>✓<\/b>/);
+  assert.match(html, /<span>Turn<\/span><b>!<\/b>/);
+  assert.doesNotMatch(html, /River/);
   assert.match(html, /86%/);
+  assert.match(html, /ΔEV total/);
+  assert.match(html, /−0,04 BB/);
   assert.match(html, /Repetir mão/);
   assert.match(html, /Próxima mão/);
 });

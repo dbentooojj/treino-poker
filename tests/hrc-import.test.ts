@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
 import { deflateRawSync } from "node:zlib";
-import { HrcImportError, normalizeHrcNodeReference, parseHrcPack, summarizeHrcStudy, toHrcStudyImport, validateHrcPack } from "../lib/hrc-import";
+import { HrcImportError, normalizeHrcNodeReference, parseHrcPack, positionNames, summarizeHrcStudy, toHrcStudyImport, validateHrcPack } from "../lib/hrc-import";
 
 const settings = {
   handdata: {
@@ -76,6 +76,10 @@ const automaticXNode = {
   hands: automaticXHands,
 };
 
+test("mapeia os players HRC 8-max na ordem padrão", () => {
+  assert.deepEqual(positionNames(8), ["UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB"]);
+});
+
 test("aceita um Complete Export válido e preserva estratégia, EVs e metadados", async () => {
   const file = zipFile({
     "settings.json": JSON.stringify(settings),
@@ -90,7 +94,7 @@ test("aceita um Complete Export válido e preserva estratégia, EVs e metadados"
   assert.equal(Object.keys(pack.nodes[0].hands).length, 169, "conversões de inspeção preservam o pack de entrada por padrão");
   assert.equal(study.playersCount, 2);
   assert.equal(study.evUnit, "UNKNOWN", "o importador não deve inventar a unidade do EV ChipEV");
-  assert.equal(study.metadata.validationVersion, 3);
+  assert.equal(study.metadata.validationVersion, 4);
   assert.equal(study.stackBb, 10);
   assert.equal(study.ante, 10);
   assert.equal(study.anteType, "BB_ANTE");
@@ -183,7 +187,9 @@ test("Complete Export importa X automático e X real como check no mesmo pacote"
 
   assert.equal(pack.nodes.length, 2);
   assert.equal(study.sourceNodes.length, 2);
-  assert.equal(study.nodes.length, 0, "VS_LIMP ainda não deve gerar trainingHands");
+  assert.equal(study.nodes.length, 1, "VS_LIMP deve ser materializado somente para navegar Full Hand");
+  assert.equal(study.nodes[0].decisionEligible, false);
+  assert.equal(study.nodes[0].trainingType, null);
   assert.equal(mixedSource?.ignoredReason, "UNSUPPORTED_SEQUENCE");
   assert.deepEqual(mixedSource?.sequence, mixedCheckNode.sequence.map((action) => ({ ...action, metadata: {} })));
   assert.deepEqual(mixedSource?.actions.map((action) => [action.type, action.amount, action.node]), [
@@ -574,7 +580,9 @@ test("não classifica raise sobre limp como VS_OPEN", async () => {
     hands: strategyHands([0.2, 0.5, 0.3], [-1, 0, 1]),
   };
   const study = await studyFromNodes([limpRaiseNode]);
-  assert.equal(study.nodes.length, 0);
+  assert.equal(study.nodes.length, 1);
+  assert.equal(study.nodes[0].decisionEligible, false);
+  assert.equal(study.nodes[0].trainingType, null);
   assert.equal(study.ignoredNodes.UNSUPPORTED_SEQUENCE, 1);
 });
 
@@ -607,7 +615,9 @@ test("cold 4-bet não é confundido com VS_3_BET", async () => {
     hands: strategyHands([0.5, 0.5], [0, 1]),
   };
   const study = await studyFromNodes([node], threeMaxSettings);
-  assert.equal(study.nodes.length, 0);
+  assert.equal(study.nodes.length, 1);
+  assert.equal(study.nodes[0].decisionEligible, false);
+  assert.equal(study.nodes[0].trainingType, null);
   assert.equal(study.ignoredNodes.UNSUPPORTED_SEQUENCE, 1);
 });
 
@@ -660,8 +670,49 @@ test("preserva source node não treinável e ligação action → child sem dupl
   assert.equal(study.sourceNodes.length, 2);
   assert.equal(study.sourceNodes[0].actions[1].node, 1);
   assert.equal(study.sourceNodes[1].trainingNodeKey, null);
-  assert.equal("hands" in study.sourceNodes[1], false);
+  assert.equal(study.sourceNodes[1].hands.length, 0, "leaf estrutural não duplica training_hands");
   assert.equal(study.nodes.length, 1);
+  assert.ok(study.capabilities.some((item) => item.capability === "FULL_HAND_PREFLOP"));
+});
+
+test("Full Hand preserva estratégia mixed de node navegável que não vira pergunta de Decisão", async () => {
+  const root = {
+    ...pushNode,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000, node: 1 }],
+  };
+  const unsupportedChild = {
+    ...callNode,
+    player: 1,
+    sequence: [
+      { type: "R", amount: 1_000, player: 0, street: 0 },
+      { type: "C", amount: 500, player: 1, street: 0 },
+    ],
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 500 }],
+    hands: strategyHands([0.35, 0.65], [-0.2, 0.1]),
+  };
+  const study = await studyFromNodes([root, unsupportedChild]);
+  const sourceChild = study.sourceNodes[1];
+  assert.equal(sourceChild.trainingNodeKey, "1");
+  assert.equal(sourceChild.hands.length, 0, "a estratégia deve ser reutilizada de training_hands");
+  const fullHandOnlyNode = study.nodes.find((node) => node.nodeKey === "1")!;
+  assert.equal(fullHandOnlyNode.decisionEligible, false);
+  assert.deepEqual(fullHandOnlyNode.hands.find((hand) => hand.handClass === "AKo")?.strategy, {
+    "action-0": 0.35,
+    "action-1": 0.65,
+  });
+  assert.ok(study.capabilities.some((item) => item.capability === "FULL_HAND_PREFLOP"));
+});
+
+test("não concede Full Hand quando uma referência de child node não pode ser resolvida", async () => {
+  const root = {
+    ...pushNode,
+    actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000, node: "nodes/missing.json" }],
+  };
+  const study = await studyFromNodes([root]);
+  assert.ok(study.capabilities.some((item) => item.capability === "DECISION"));
+  assert.ok(!study.capabilities.some((item) => item.capability === "FULL_HAND_PREFLOP"));
+  const validation = study.metadata.fullHandValidation as { reasons: string[] };
+  assert.ok(validation.reasons.includes("CHILD_UNRESOLVED"));
 });
 
 test("normaliza referências numéricas e paths de child nodes para a mesma identidade", () => {
@@ -690,7 +741,7 @@ test("relatório contabiliza source, pré-flop, treináveis e cada descarte", as
   assert.equal(summary.sourceNodeCount, 5);
   assert.equal(summary.preflopNodeCount, 4);
   assert.equal(summary.nodeCount, 1);
-  assert.equal(summary.storedHandClassCount, 169);
+  assert.equal(summary.storedHandClassCount, 507);
   assert.equal(summary.eligibleTrainingHandClassCount, 168);
   assert.deepEqual(summary.ignoredNodes, { POSTFLOP: 1, AUTOMATIC_X: 0, UNSUPPORTED_SEQUENCE: 1, NO_ELIGIBLE_HANDS: 1, NON_TRAINABLE: 1 });
   assert.equal(summary.ignoredCount, 4);

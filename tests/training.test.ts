@@ -1,7 +1,60 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, evaluateChoice, presentStrategy, rangeActionShares, resolvedActionLabel, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
+import { startAutoAdvanceTimer } from "../lib/auto-advance";
+import { MAX_EXERCISE_QUEUE_SIZE, buildExerciseQueue, buildRangeMatrix, classifyTrainingChoice, evaluateChoice, isTrainingPosition, presentStrategy, rangeActionShares, resolvedActionLabel, sameQueueEntry, type QueueEntry, type TrainingAction } from "../lib/training";
+
+test("timer de avanço automático conta cinco segundos e cancela sem callback atrasado", () => {
+  let now = 0;
+  let intervalCallback: () => void = () => undefined;
+  let timeoutCallback: () => void = () => undefined;
+  let clearedIntervals = 0;
+  let clearedTimeouts = 0;
+  let elapsedCalls = 0;
+  const ticks: number[] = [];
+  const handle = {} as ReturnType<typeof globalThis.setTimeout>;
+  const scheduler = {
+    now: () => now,
+    setInterval: (callback: () => void) => { intervalCallback = callback; return handle; },
+    clearInterval: () => { clearedIntervals += 1; },
+    setTimeout: (callback: () => void) => { timeoutCallback = callback; return handle; },
+    clearTimeout: () => { clearedTimeouts += 1; },
+  };
+
+  const timer = startAutoAdvanceTimer({ scheduler, onTick: (remaining) => ticks.push(remaining), onElapsed: () => { elapsedCalls += 1; } });
+  now = 1_001;
+  intervalCallback();
+  timer.cancel();
+  timer.cancel();
+  timeoutCallback();
+
+  assert.deepEqual(ticks, [5, 4]);
+  assert.equal(elapsedCalls, 0);
+  assert.equal(clearedIntervals, 1);
+  assert.equal(clearedTimeouts, 1);
+});
+
+test("timer de avanço automático dispara uma única vez ao expirar", () => {
+  let timeoutCallback: () => void = () => undefined;
+  let elapsedCalls = 0;
+  const handle = {} as ReturnType<typeof globalThis.setTimeout>;
+  const timer = startAutoAdvanceTimer({
+    scheduler: {
+      now: () => 0,
+      setInterval: () => handle,
+      clearInterval: () => undefined,
+      setTimeout: (callback: () => void) => { timeoutCallback = callback; return handle; },
+      clearTimeout: () => undefined,
+    },
+    onTick: () => undefined,
+    onElapsed: () => { elapsedCalls += 1; },
+  });
+
+  timeoutCallback();
+  timeoutCallback();
+  timer.cancel();
+  assert.equal(elapsedCalls, 1);
+});
 
 const entries: QueueEntry[] = [
   { trainingSetId: "set-a", trainingNodeId: "btn", trainingHandId: "a7s" },
@@ -9,6 +62,10 @@ const entries: QueueEntry[] = [
   { trainingSetId: "set-b", trainingNodeId: "hj", trainingHandId: "22" },
   { trainingSetId: "set-b", trainingNodeId: "sb", trainingHandId: "qjs" },
 ];
+
+test("aceita LJ na configuração de posição do Hero", () => {
+  assert.equal(isTrainingPosition("LJ"), true);
+});
 
 test("fila atende 20, 50 e 100 perguntas sem repetir dentro de cada ciclo", () => {
   for (const target of [20, 50, 100]) {
@@ -97,6 +154,36 @@ test("mixed strategy usa a escala do vetor inteiro e respeita a borda de 5%", ()
   const fractionalFivePercent = presentStrategy({ fold: 0.95, shove: 0.05 }, actions);
   assert.deepEqual(fractionalFivePercent.actions.map((item) => item.frequencyPercent), [95, 5]);
   assert.equal(evaluateChoice("shove", actions, "fold", evs, { fold: 0.95, shove: 0.05 })?.correct, true);
+});
+
+test("classifica melhor jogada, alternativa correta, imprecisão e erro pela frequência", () => {
+  const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }, { id: "raise", type: "RAISE" }];
+  const strategy = { fold: 0.7, call: 0.26, raise: 0.04 };
+  assert.equal(classifyTrainingChoice("fold", actions, "fold", strategy)?.grade, "BEST");
+  assert.equal(classifyTrainingChoice("call", actions, "fold", strategy)?.grade, "CORRECT");
+  assert.equal(classifyTrainingChoice("raise", actions, "fold", strategy)?.grade, "INACCURACY");
+  assert.equal(classifyTrainingChoice("raise", actions, "fold", { fold: 0.74, call: 0.26, raise: 0 })?.grade, "WRONG");
+});
+
+test("melhor jogada segue o maior EV configurado, não a maior frequência", () => {
+  const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }];
+  assert.equal(classifyTrainingChoice("fold", actions, "call", { fold: 0.7, call: 0.3 })?.grade, "CORRECT");
+  assert.equal(classifyTrainingChoice("call", actions, "call", { fold: 0.4998, call: 0.5002 })?.grade, "BEST");
+});
+
+test("distingue sizings de raise ao classificar e apresentar ações", () => {
+  const actions: TrainingAction[] = [
+    { id: "fold", type: "FOLD" },
+    { id: "call", type: "CALL" },
+    { id: "three-bet", type: "RAISE", amountBb: 5.75 },
+    { id: "all-in", type: "RAISE", amountBb: 20, label: "All-in" },
+  ];
+  const strategy = { fold: 0, call: 0.314, "three-bet": 0.074, "all-in": 0.612 };
+  const context = { heroStackBb: 20, trainingType: "VS_OPEN" as const };
+
+  assert.equal(classifyTrainingChoice("three-bet", actions, "call", strategy)?.grade, "CORRECT");
+  assert.ok(Math.abs((classifyTrainingChoice("all-in", actions, "call", strategy)?.selectedAction?.frequencyPercent ?? 0) - 61.2) < 0.000001);
+  assert.equal(resolvedActionLabel(actions[3], actions, context), "All-in");
 });
 
 test("avaliação não usa estratégia legada incompleta ou com soma inválida", () => {

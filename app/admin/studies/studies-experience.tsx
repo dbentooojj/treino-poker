@@ -157,6 +157,7 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
         <small>{modelLabels[importReport.equityModel]} · {importReport.playersCount}-max · {importReport.stackBb === null ? "stacks variados" : `${formatNumber(importReport.stackBb)} BB`} · {formatAnte(importReport)}</small>
         <small>{importReport.sourceNodeCount} source nodes · {importReport.preflopNodeCount} pré-flop · {importReport.nodeCount} treináveis</small>
         <small>{importReport.storedHandClassCount} classes de mão armazenadas · {importReport.eligibleTrainingHandClassCount} elegíveis para treino</small>
+        <small>Modos suportados: {importReport.capabilities.length ? importReport.capabilities.map((capability) => capability === "DECISION" ? "Decisão" : "Mão completa — Pré-flop").join(" · ") : "Nenhum"}</small>
         <small>{importReport.counts.OPEN_FOLD} RFI · {importReport.counts.VS_OPEN} vs Open · {importReport.counts.VS_3_BET} vs 3-bet · {importReport.counts.VS_4_BET} vs 4-bet · {importReport.counts.PUSH_FOLD} Push/Fold · {importReport.counts.CALL_VS_SHOVE} vs Shove</small>
         {importReport.ignoredCount > 0 && <small>{importReport.ignoredCount} ignorados: {Object.entries(importReport.ignoredNodes).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(" · ")}</small>}
       </div><Button type="button" variant="ghost" size="sm" iconOnly onClick={() => setImportReport(null)} aria-label="Fechar aviso"><Icon name="close"/></Button></StatusMessage>}
@@ -173,7 +174,7 @@ export default function AdminStudiesExperience({ user, data }: { user: AuthUser;
         {adminData.studies.length > 0 ? <div className="studies-table-scroll"><table className="studies-table">
           <thead><tr><th>Nome</th><th>Modelo</th><th>Mesa</th><th>Stack</th><th>Ante</th><th>Spots</th><th>Status</th><th>Importado em</th><th>Ações</th></tr></thead>
           <tbody>{adminData.studies.map((study) => <tr key={study.id}>
-            <td data-label="Nome"><b>{study.name}</b><small>HRC · Pré-flop</small></td>
+            <td data-label="Nome"><b>{study.name}</b><small>HRC · Pré-flop</small><small>Modos suportados: {study.capabilities.length ? study.capabilities.map((capability) => capability === "DECISION" ? "Decisão" : "Mão completa — Pré-flop").join(" · ") : "Nenhum"}</small></td>
             <td data-label="Modelo">{modelLabels[study.equityModel]}</td>
             <td data-label="Mesa">{study.playersCount}-max</td>
             <td data-label="Stack">{study.stackBb === null ? "—" : `${formatNumber(study.stackBb)} BB`}</td>

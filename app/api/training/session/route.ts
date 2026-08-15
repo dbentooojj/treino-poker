@@ -11,7 +11,7 @@ import {
   getTrainingReportSpot,
   type SessionStartRequest,
 } from "../../../../db/training";
-import { isEquityModel, isQuestionCount, isTrainingPosition, isTrainingPresentationMode, isTrainingType, type TrainingConfig } from "../../../../lib/training";
+import { isEquityModel, isFullHandStage, isQuestionCount, isTrainingPosition, isTrainingPresentationMode, isTrainingType, type TrainingConfig } from "../../../../lib/training";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +75,7 @@ export async function PATCH(request: Request) {
       answer: result.answer,
       answeredQuestions: result.answeredQuestions,
       correctAnswers: result.correctAnswers,
+      completedHands: result.completedHands,
       nextExercise: result.nextExercise,
       report: result.report,
       replayed: result.replayed,
@@ -93,6 +94,8 @@ function parseStartRequest(value: unknown): SessionStartRequest | null {
   const config = payload.config as Partial<TrainingConfig> | undefined;
   if (!config || (config.trainingType !== null && !isTrainingType(config.trainingType)) || !isEquityModel(config.equityModel) || !isQuestionCount(config.targetQuestions)) return null;
   if (config.presentationMode !== undefined && !isTrainingPresentationMode(config.presentationMode)) return null;
+  if (config.fullHandStage !== undefined && !isFullHandStage(config.fullHandStage)) return null;
+  if (config.presentationMode === "FROM_START" && (config.trainingType !== null || !isFullHandStage(config.fullHandStage))) return null;
   if (config.stackDepthBb !== undefined && (!Number.isFinite(config.stackDepthBb) || config.stackDepthBb <= 0)) return null;
   if (config.heroPosition !== undefined && !isTrainingPosition(config.heroPosition)) return null;
   return { mode: "START", config: {
@@ -102,6 +105,7 @@ function parseStartRequest(value: unknown): SessionStartRequest | null {
     heroPosition: config.heroPosition,
     targetQuestions: config.targetQuestions,
     presentationMode: config.presentationMode ?? "DECISION",
+    fullHandStage: isFullHandStage(config.fullHandStage) ? config.fullHandStage : undefined,
   } };
 }
 

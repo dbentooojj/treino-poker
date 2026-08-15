@@ -249,6 +249,7 @@ export class HandEngine {
       handLabel: rank ? describeRank(rank) : "Pote sem showdown",
       score: this.score(),
       reviews: this.streetReviews(),
+      evDeltaBb: this.evDeltaBb(),
       wonPotBb: this.state.potBb,
       showdown,
     };
@@ -257,17 +258,52 @@ export class HandEngine {
   private score() {
     const heroRecords = this.state.actionHistory.filter((record) => record.hero);
     if (heroRecords.length === 0) return 0;
-    const preferred = heroRecords.filter((record) => this.nodes.get(record.nodeId)?.preferredActionId === record.actionId).length;
-    return Math.round(preferred / heroRecords.length * 100);
+    const correct = heroRecords.filter((record) => ["BEST", "CORRECT"].includes(this.actionGrade(record))).length;
+    return Math.round(correct / heroRecords.length * 100);
   }
 
   private streetReviews(): StreetReview[] {
     return STREET_ORDER.map((street) => {
       const decisions = this.state.actionHistory.filter((record) => record.hero && record.street === street);
       if (decisions.length === 0) return { street, status: "NOT_PLAYED" };
-      const correct = decisions.every((record) => this.nodes.get(record.nodeId)?.preferredActionId === record.actionId);
-      return { street, status: correct ? "CORRECT" : "REVIEW" };
+      const grades = decisions.map((record) => this.actionGrade(record));
+      const status: StreetReview["status"] = grades.includes("WRONG")
+        ? "WRONG"
+        : grades.includes("INACCURACY")
+          ? "INACCURACY"
+          : grades.includes("CORRECT")
+            ? "CORRECT"
+            : "BEST";
+      return { street, status };
     });
+  }
+
+  private actionGrade(record: HandActionRecord): StreetReview["status"] {
+    const node = this.nodes.get(record.nodeId);
+    const strategy = node?.strategy?.actions;
+    const selected = strategy?.find((action) => action.actionId === record.actionId);
+    const dominantFrequency = strategy?.reduce((maximum, action) => Math.max(maximum, action.frequencyPercent), 0);
+    if (selected && dominantFrequency !== undefined) {
+      if (selected.frequencyPercent >= dominantFrequency - .1) return "BEST";
+      if (selected.frequencyPercent >= 5) return "CORRECT";
+      if (selected.frequencyPercent > 0) return "INACCURACY";
+      return "WRONG";
+    }
+    return node?.preferredActionId === record.actionId ? "BEST" : "WRONG";
+  }
+
+  private evDeltaBb() {
+    let total = 0;
+    let comparableDecisions = 0;
+    for (const record of this.state.actionHistory.filter((entry) => entry.hero)) {
+      const strategy = this.nodes.get(record.nodeId)?.strategy?.actions ?? [];
+      const selectedEv = strategy.find((action) => action.actionId === record.actionId)?.evBb;
+      const availableEvs = strategy.map((action) => action.evBb).filter((value): value is number => value !== undefined && Number.isFinite(value));
+      if (selectedEv === undefined || availableEvs.length === 0) continue;
+      total += selectedEv - Math.max(...availableEvs);
+      comparableDecisions += 1;
+    }
+    return comparableDecisions > 0 ? Number(total.toFixed(4)) : null;
   }
 
   private activateNode(nodeId: string) {
