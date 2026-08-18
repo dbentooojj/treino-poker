@@ -67,6 +67,8 @@ export type BlindStructure = {
 
 export type TrainingOptions = {
   trainingTypes: TrainingType[];
+  trainingTypeCounts: Record<TrainingType, number>;
+  totalTrainingNodes: number;
   equityModels: EquityModel[];
   stackDepthsBb: number[];
   heroPositions: string[];

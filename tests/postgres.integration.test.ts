@@ -339,6 +339,72 @@ test("fluxo PostgreSQL completo preserva integridade, publicação e isolamento"
   const publishedOptions = await getTrainingOptions(config);
   assert.equal(publishedOptions.hasMatches, true, "estudo publicado deve aparecer nos filtros");
   assert.deepEqual(publishedOptions.trainingTypes, ["PUSH_FOLD"]);
+  assert.equal(publishedOptions.trainingTypeCounts.PUSH_FOLD, 2, "o count deve representar nodes, não classes de mão");
+  assert.equal(publishedOptions.totalTrainingNodes, 2);
+
+  const availabilitySetId = crypto.randomUUID();
+  await sqlClient`INSERT INTO training_sets
+    (id, name, content_hash, equity_model, players_count, stack_bb, small_blind, big_blind, status, is_published, published_at)
+    VALUES (${availabilitySetId}, 'Disponibilidade contextual', ${"f".repeat(64)}, 'ICM', 8, 15, 0.5, 1, 'PUBLISHED', true, now())`;
+  const availabilityNodes = [
+    { key: "rfi-hj-15", type: "OPEN_FOLD", position: "HJ", stack: 15 },
+    { key: "vs-open-hj-15", type: "VS_OPEN", position: "HJ", stack: 15 },
+    { key: "vs-3-bet-hj-15-a", type: "VS_3_BET", position: "HJ", stack: 15 },
+    { key: "vs-3-bet-hj-15-b", type: "VS_3_BET", position: "HJ", stack: 15 },
+    { key: "vs-shove-hj-15", type: "CALL_VS_SHOVE", position: "HJ", stack: 15 },
+    { key: "vs-3-bet-co-15", type: "VS_3_BET", position: "CO", stack: 15 },
+    { key: "rfi-hj-20", type: "OPEN_FOLD", position: "HJ", stack: 20 },
+  ] as const;
+  for (const node of availabilityNodes) {
+    const nodeId = crypto.randomUUID();
+    await sqlClient`INSERT INTO training_nodes
+      (id, training_set_id, node_key, training_type, hero_position, hero_stack_bb, action_sequence, available_actions)
+      VALUES (${nodeId}, ${availabilitySetId}, ${node.key}, ${node.type}, ${node.position}, ${node.stack}, '[]'::jsonb,
+        '[{"id":"fold","type":"FOLD"},{"id":"raise","type":"RAISE","amountBb":4}]'::jsonb)`;
+    await sqlClient`INSERT INTO training_hands
+      (id, training_node_id, hand_class, strategy, evs, best_action)
+      VALUES (${crypto.randomUUID()}, ${nodeId}, 'AA', '{"fold":0,"raise":1}'::jsonb, '{"fold":0,"raise":1}'::jsonb, 'raise')`;
+    if (node.key === "vs-3-bet-hj-15-a") {
+      await sqlClient`INSERT INTO training_hands
+        (id, training_node_id, hand_class, strategy, evs, best_action)
+        VALUES (${crypto.randomUUID()}, ${nodeId}, 'KK', '{"fold":0,"raise":1}'::jsonb, '{"fold":0,"raise":1}'::jsonb, 'raise')`;
+    }
+  }
+
+  const { GET: getTrainingOptionsRoute } = await import("../app/api/training/options/route");
+  const contextualOptionsResponse = await getTrainingOptionsRoute(new Request("http://localhost/api/training/options?equityModel=ICM&stackDepthBb=15&heroPosition=HJ", {
+    headers: { cookie: `rangelab_session=${login.token}` },
+  }));
+  assert.equal(contextualOptionsResponse.status, 200);
+  const contextualOptions = await contextualOptionsResponse.json() as Awaited<ReturnType<typeof getTrainingOptions>>;
+  assert.deepEqual(contextualOptions.trainingTypeCounts, {
+    PUSH_FOLD: 0,
+    CALL_VS_SHOVE: 1,
+    OPEN_FOLD: 1,
+    VS_OPEN: 1,
+    VS_3_BET: 2,
+    VS_4_BET: 0,
+  }, "ações disponíveis e indisponíveis devem vir dos nodes elegíveis para HJ/15 BB");
+  assert.equal(contextualOptions.totalTrainingNodes, 5, "Qualquer deve somar os nodes dos tipos disponíveis");
+  assert.deepEqual(contextualOptions.trainingTypes, ["CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET"]);
+
+  const coOptions = await getTrainingOptions({ equityModel: "ICM", stackDepthBb: 15, heroPosition: "CO" });
+  assert.equal(coOptions.trainingTypeCounts.VS_3_BET, 1, "o count deve variar com a posição do Hero");
+  assert.equal(coOptions.trainingTypeCounts.OPEN_FOLD, 0);
+  assert.equal(coOptions.totalTrainingNodes, 1);
+
+  const otherStackOptions = await getTrainingOptions({ equityModel: "ICM", stackDepthBb: 20, heroPosition: "HJ" });
+  assert.equal(otherStackOptions.trainingTypeCounts.OPEN_FOLD, 1, "trocar stack deve recalcular os counts");
+  assert.equal(otherStackOptions.trainingTypeCounts.VS_3_BET, 0);
+  assert.equal(otherStackOptions.totalTrainingNodes, 1);
+
+  const vsThreeBetSession = await createTrainingSession(adminUser.id, {
+    mode: "START",
+    config: { trainingType: "VS_3_BET", equityModel: "ICM", stackDepthBb: 15, heroPosition: "HJ", targetQuestions: 1 },
+  });
+  assert.equal(vsThreeBetSession.exercise.trainingType, "VS_3_BET", "selecionar a ação deve restringir a fila ao trainingType correspondente");
+  assert.equal(vsThreeBetSession.exercise.heroPosition, "HJ");
+  await finishTrainingSession(adminUser.id, vsThreeBetSession.id);
 
   await assert.rejects(
     createTrainingSession(adminUser.id, { mode: "START", config: { ...config, trainingType: null, targetQuestions: 1, presentationMode: "FROM_START", fullHandStage: "PREFLOP" } }),

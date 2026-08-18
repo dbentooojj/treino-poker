@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProgressExperience from "../app/progresso/progress-experience";
-import { nextReplayAttempt, TrainingReportView } from "../app/training-experience";
+import { nextReplayAttempt, TrainingActionPicker, TrainingReportView } from "../app/training-experience";
 import { TrainingDecision, TrainingTablePreview } from "../components/training/TrainingDecision";
 import { mobileTableBetCoordinate, mobileTableSeatCoordinates } from "../components/training/UnifiedPokerTable";
 import {
@@ -14,7 +14,7 @@ import {
 } from "../components/training/trainingPresentation";
 import { positionNames } from "../lib/hrc-import";
 import { buildProgressDashboard } from "../lib/progress";
-import { trainingPresentationModeFromView, trainingViewModeFromPresentation, type TrainingAction, type TrainingExercise } from "../lib/training";
+import { trainingPresentationModeFromView, trainingViewModeFromPresentation, type TrainingAction, type TrainingExercise, type TrainingOptions } from "../lib/training";
 
 const fold: TrainingAction = { id: "fold", type: "FOLD" };
 const call: TrainingAction = { id: "call", type: "CALL" };
@@ -22,6 +22,26 @@ const minRaise: TrainingAction = { id: "min-raise", type: "RAISE", amountBb: 4.4
 const threeBet: TrainingAction = { id: "three-bet", type: "RAISE", amountBb: 6.6 };
 const largeRaise: TrainingAction = { id: "large-raise", type: "RAISE", amountBb: 12 };
 const allIn: TrainingAction = { id: "all-in", type: "RAISE", amountBb: 20, label: "All-in" };
+
+test("ações rápidas usam counts contextuais sem expor os números ao usuário", () => {
+  const options: TrainingOptions = {
+    trainingTypes: ["CALL_VS_SHOVE", "OPEN_FOLD", "VS_OPEN", "VS_3_BET"],
+    trainingTypeCounts: { PUSH_FOLD: 0, CALL_VS_SHOVE: 1, OPEN_FOLD: 1, VS_OPEN: 1, VS_3_BET: 2, VS_4_BET: 0 },
+    totalTrainingNodes: 5,
+    equityModels: ["CHIP_EV"],
+    stackDepthsBb: [15],
+    heroPositions: ["HJ"],
+    hasMatches: true,
+    tableContext: null,
+    fullHandStages: [],
+  };
+  const markup = renderToStaticMarkup(<TrainingActionPicker options={options} filters={{ equityModel: "CHIP_EV", stackDepthBb: 15, heroPosition: "HJ" }} onChange={() => undefined}/>);
+  assert.match(markup, />Qualquer<\/button>/);
+  assert.match(markup, />vs 3-bet<\/button>/);
+  assert.match(markup, /<button type="button" disabled="" title="Nenhum training node disponível para os filtros atuais" class="">vs 4-bet<\/button>/);
+  assert.match(markup, /<button type="button" disabled="" title="Nenhum training node disponível para os filtros atuais" class="">Push \/ Fold<\/button>/);
+  assert.doesNotMatch(markup, / · \d+/);
+});
 
 test("a mesa usa as mesmas posições produzidas pelo importador HRC", () => {
   for (const playersCount of [2, 3, 4, 5, 6, 7, 8, 9, 10]) {
@@ -513,7 +533,7 @@ test("treinar oferece mão completa somente por estudos compatíveis, sem cenár
   assert.doesNotMatch(trainer, /\{viewMode === "quick-decision" && <div className="quick-setup-group quick-solution">/);
   assert.match(trainer, /equityModelLabels\[selectedFullHandStage\.equityModel\]/);
   for (const removed of ["Solutions", "Starting spot", "Preflop action", "All settings", "Start training", "From start"]) assert.doesNotMatch(trainer, new RegExp(removed));
-  assert.match(trainer, /options\.trainingTypes\.length > 0/);
+  assert.match(trainer, /options\.totalTrainingNodes/);
   assert.match(trainer, /trainingType: filters\.trainingType \?\? null/);
   assert.match(trainer, /Todos os spots/);
   assert.match(styles, /\.inline-training-session \{ min-width:0; grid-template-columns:minmax\(0,1fr\)/);
@@ -562,7 +582,7 @@ test("prévia da mesa renderiza somente o contexto recebido de um estudo real", 
   assert.equal((empty.match(/data-position=/g) ?? []).length, 0);
 });
 
-test("prévia 9-max omite UTG+2 e usa a geometria visual de oito assentos", () => {
+test("apresenta o assento intermediário legado de 9-max como LJ na mesa e nas ações", () => {
   const markup = renderToStaticMarkup(<TrainingTablePreview context={{
     trainingSetId: "set-9-max",
     studyName: "HRC 9-max 20 BB",
@@ -576,13 +596,22 @@ test("prévia 9-max omite UTG+2 e usa a geometria visual de oito assentos", () =
   assert.match(markup, /data-seat-count="8"/);
   assert.equal((markup.match(/data-position=/g) ?? []).length, 8);
   assert.doesNotMatch(markup, /data-position="UTG\+2"/);
-  for (const position of ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"]) {
+  for (const position of ["UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB"]) {
     assert.match(markup, new RegExp(`data-position="${position.replace("+", "\\+")}"`));
   }
+  assert.match(markup, /<strong>LJ<\/strong>/);
+  assert.doesNotMatch(markup, /<strong>MP<\/strong>/);
 
-  const activeMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(9, [fold, call], "CO")} busy={false} onChoose={() => undefined}/>);
+  const exercise = makeExercise(9, [fold, call], "CO");
+  exercise.trainingType = "CALL_VS_SHOVE";
+  exercise.heroStackBb = 10;
+  exercise.villainPosition = "UTG+2";
+  exercise.actionSequence = [{ position: "UTG+2", type: "RAISE", amountBb: 10, label: "All-in" }];
+  const activeMarkup = renderToStaticMarkup(<TrainingDecision exercise={exercise} busy={false} onChoose={() => undefined}/>);
   assert.match(activeMarkup, /data-seat-count="8"/);
   assert.doesNotMatch(activeMarkup, /data-position="UTG\+2"/);
+  assert.match(activeMarkup, /LJ foi all-in 10 BB/);
+  assert.doesNotMatch(activeMarkup, /UTG\+2 foi all-in|MP foi all-in/);
 });
 
 function makeExercise(playersCount: number, availableActions: TrainingAction[], heroPosition = "BB"): TrainingExercise {

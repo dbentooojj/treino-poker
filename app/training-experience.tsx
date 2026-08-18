@@ -38,7 +38,17 @@ import {
   type TrainingType,
 } from "../lib/training";
 
-const EMPTY_OPTIONS: TrainingOptions = { trainingTypes: [], equityModels: [], stackDepthsBb: [], heroPositions: [], hasMatches: false, tableContext: null, fullHandStages: [] };
+const EMPTY_OPTIONS: TrainingOptions = {
+  trainingTypes: [],
+  trainingTypeCounts: Object.fromEntries(TRAINING_TYPES.map((type) => [type, 0])) as Record<TrainingType, number>,
+  totalTrainingNodes: 0,
+  equityModels: [],
+  stackDepthsBb: [],
+  heroPositions: [],
+  hasMatches: false,
+  tableContext: null,
+  fullHandStages: [],
+};
 const ACTIVE_TRAINING_VIEW_MODE: TrainingViewMode = "quick-decision";
 const AUTO_ADVANCE_PREFERENCE_KEY = "rangelab:training:auto-advance";
 
@@ -115,9 +125,10 @@ export function TrainingSetup({ preferredType, initialFilters, initialTargetQues
       <div className="setup-heading"><span>CONFIGURAÇÃO DO TREINO</span><h2 id="setup-title">Prepare sua sessão</h2><p id="setup-description">Escolha o foco e o modelo. Os estudos publicados definem as mãos disponíveis.</p></div>
       <TrainingModeSelector value={viewMode} onChange={setViewMode}/>
       {viewMode === "quick-decision" ? <><div className="setup-group"><span className="setup-label" id="training-type-label">Tipo de treinamento</span><div className="training-type-grid" role="group" aria-labelledby="training-type-label">{TRAINING_TYPES.map((type) => {
-        const available = options.trainingTypes.includes(type);
-        return <button key={type} type="button" disabled={!available || loading} className={filters.trainingType === type ? "selected" : ""} onClick={() => setFilters({ trainingType: type })}>
-          <b>{trainingTypeLabels[type]}</b><small>{trainingTypeDescriptions[type]}</small>{!loading && !available && <i>Sem estudo</i>}
+        const count = options.trainingTypeCounts[type];
+        const available = count > 0;
+        return <button key={type} type="button" disabled={!available || loading} className={filters.trainingType === type ? "selected" : ""} onClick={() => setFilters((current) => ({ ...current, trainingType: type }))}>
+          <b>{trainingTypeLabels[type]}</b><small>{trainingTypeDescriptions[type]}</small>{!loading && !available && <i>Sem spots</i>}
         </button>;
       })}</div></div>
       {loading && options.trainingTypes.length === 0 ? <div className="setup-loading"><i/><span>Consultando estudos disponíveis…</span></div> : noStudies ? <EmptyStudies/> : <>
@@ -147,11 +158,21 @@ const QUICK_PREFLOP_ACTIONS: Array<{ id: string; label: string; type?: TrainingT
   { id: "ANY", label: "Qualquer" },
   { id: "RFI", label: "RFI", type: "OPEN_FOLD" },
   { id: "VS_OPEN", label: "vs Open", type: "VS_OPEN" },
-  { id: "VS_3_BET", label: "vs 3-bet" },
+  { id: "VS_3_BET", label: "vs 3-bet", type: "VS_3_BET" },
   { id: "PUSH_FOLD", label: "Push / Fold", type: "PUSH_FOLD" },
   { id: "VS_SHOVE", label: "vs Shove", type: "CALL_VS_SHOVE" },
-  { id: "VS_4_BET", label: "vs 4-bet" },
+  { id: "VS_4_BET", label: "vs 4-bet", type: "VS_4_BET" },
 ];
+
+export function TrainingActionPicker({ options, filters, loading = false, onChange }: { options: TrainingOptions; filters: TrainingFilters; loading?: boolean; onChange: (trainingType: TrainingType | undefined) => void }) {
+  return <div role="group" aria-labelledby="preflop-action-label">{QUICK_PREFLOP_ACTIONS.map((item) => {
+    const isAny = item.id === "ANY";
+    const count = isAny ? options.totalTrainingNodes : item.type ? options.trainingTypeCounts[item.type] : 0;
+    const available = count > 0;
+    const selected = isAny ? available && !filters.trainingType : item.type === filters.trainingType;
+    return <button type="button" key={item.id} disabled={!available || loading} title={available ? undefined : "Nenhum training node disponível para os filtros atuais"} className={selected ? "selected" : ""} onClick={() => onChange(isAny ? undefined : item.type)}>{item.label}</button>;
+  })}</div>;
+}
 
 export function TrainingQuickSetup({ onStarted }: { onStarted: (session: TrainingSession) => void }) {
   const [viewMode, setViewMode] = useState<TrainingViewMode>(ACTIVE_TRAINING_VIEW_MODE);
@@ -244,18 +265,7 @@ export function TrainingQuickSetup({ onStarted }: { onStarted: (session: Trainin
       <TrainingModeSelector compact value={viewMode} onChange={setViewMode}/>
       {viewMode === "quick-decision" ? <div className="quick-setup-group quick-preflop-action">
         <span className="quick-label" id="preflop-action-label">Ação</span>
-        <div role="group" aria-labelledby="preflop-action-label">{QUICK_PREFLOP_ACTIONS.map((item) => {
-          const isAny = item.id === "ANY";
-          const available = isAny ? options.trainingTypes.length > 0 : item.type ? options.trainingTypes.includes(item.type) : false;
-          const selected = isAny ? available && !filters.trainingType : item.type === filters.trainingType;
-          return <button type="button" key={item.id} disabled={!available || loading} title={available ? undefined : item.type ? "Nenhum estudo publicado para esta categoria" : "Ainda não há suporte para este filtro"} className={selected ? "selected" : ""} onClick={() => {
-            if (isAny) {
-              setFilters((current) => ({ equityModel: current.equityModel }));
-            } else if (item.type) {
-              setFilters((current) => ({ trainingType: item.type, equityModel: current.equityModel }));
-            }
-          }}>{item.label}</button>;
-        })}</div>
+        <TrainingActionPicker options={options} filters={filters} loading={loading} onChange={(trainingType) => setFilters((current) => ({ ...current, trainingType }))}/>
       </div> : <div className={`quick-setup-group quick-preflop-action${options.fullHandStages.length === 1 ? " quick-single-study" : ""}`}>
         <span className="quick-label" id="full-hand-study-label">Estudo</span>
         {selectedFullHandStage

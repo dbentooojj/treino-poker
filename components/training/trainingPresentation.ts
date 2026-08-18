@@ -159,6 +159,8 @@ export function deriveTrainingTableVisualState(
 
 export function displayTrainingPosition(position: string, playersCount: number) {
   const normalized = normalizeTrainingPosition(position);
+  // Legacy 9-max studies are presented in the current eight-seat layout.
+  if (playersCount === 9 && (normalized === "UTG+2" || normalized === "MP")) return "LJ";
   return playersCount === 2 && normalized === "SB" ? "BTN/SB" : normalized;
 }
 

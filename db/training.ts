@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gte, isNull, lt, sql, type SQL } from "drizzle-orm"
 import type { PgColumn } from "drizzle-orm/pg-core";
 import {
   buildExerciseQueue,
+  TRAINING_TYPES,
   MAX_EXERCISE_QUEUE_SIZE,
   actionAliases,
   actionKey,
@@ -66,7 +67,22 @@ export class TrainingSessionStateError extends Error {}
 
 export async function getTrainingOptions(filters: TrainingFilters): Promise<TrainingOptions> {
   const fullHandStages = await getPublishedFullHandStages();
-  const trainingTypes = await distinct<TrainingType>(trainingNodes.trainingType, filters, []);
+  const typeRows = await getDb().select({
+    trainingType: trainingNodes.trainingType,
+    count: sql<number>`COUNT(DISTINCT ${trainingNodes.id})::int`,
+  }).from(trainingHands)
+    .innerJoin(trainingNodes, eq(trainingNodes.id, trainingHands.trainingNodeId))
+    .innerJoin(trainingSets, eq(trainingSets.id, trainingNodes.trainingSetId))
+    .where(and(
+      DECISION_NODE_CONDITION,
+      ...conditions(filters, ["equityModel", "stackDepthBb", "heroPosition"]),
+      eligibleHandCondition(),
+    ))
+    .groupBy(trainingNodes.trainingType);
+  const trainingTypeCounts = Object.fromEntries(TRAINING_TYPES.map((type) => [type, 0])) as Record<TrainingType, number>;
+  for (const row of typeRows) if (row.trainingType) trainingTypeCounts[row.trainingType] = row.count;
+  const trainingTypes = TRAINING_TYPES.filter((type) => trainingTypeCounts[type] > 0);
+  const totalTrainingNodes = TRAINING_TYPES.reduce((total, type) => total + trainingTypeCounts[type], 0);
   const equityModels = await distinct<EquityModel>(trainingSets.equityModel, filters, ["trainingType"]);
   const stackDepthsBb = await distinct<number>(trainingNodes.heroStackBb, filters, ["trainingType", "equityModel"]);
   const heroPositions = await distinct<string>(trainingNodes.heroPosition, filters, ["trainingType", "equityModel", "stackDepthBb"]);
@@ -87,6 +103,8 @@ export async function getTrainingOptions(filters: TrainingFilters): Promise<Trai
     .limit(1);
   return {
     trainingTypes,
+    trainingTypeCounts,
+    totalTrainingNodes,
     equityModels,
     stackDepthsBb,
     heroPositions: sortPositions(heroPositions),
