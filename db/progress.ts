@@ -1,5 +1,6 @@
 import { and, desc, eq, gt } from "drizzle-orm";
 import { buildProgressDashboard, type ProgressAnswerRecord, type ProgressSessionRecord } from "../lib/progress";
+import type { TrainingAction } from "../lib/training";
 import { getDb } from "./index";
 import { trainingAnswers, trainingNodes, trainingSessions, trainingSets } from "./schema";
 
@@ -34,6 +35,9 @@ export async function getProgressDashboard(userId: string) {
       selectedAction: trainingAnswers.selectedAction,
       bestAction: trainingAnswers.bestAction,
       isCorrect: trainingAnswers.isCorrect,
+      strategy: trainingAnswers.strategy,
+      isMixed: trainingAnswers.isMixed,
+      availableActions: trainingNodes.availableActions,
       evs: trainingAnswers.evs,
       bigBlind: trainingSets.bigBlind,
       answeredAt: trainingAnswers.answeredAt,
@@ -54,6 +58,7 @@ export async function getProgressDashboard(userId: string) {
     endedAt: row.endedAt?.getTime() ?? null,
   })), answerRows.map((row): ProgressAnswerRecord => ({
     ...row,
+    availableActions: row.availableActions as TrainingAction[],
     answeredAt: row.answeredAt.getTime(),
   })), Date.now(), {
     sessionsReturned: rows.length,

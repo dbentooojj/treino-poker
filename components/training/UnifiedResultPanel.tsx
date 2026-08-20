@@ -1,14 +1,18 @@
 export type UnifiedResultReview = {
   id: string;
-  status: "BEST" | "CORRECT" | "INACCURACY" | "WRONG" | "REVIEW" | "NOT_PLAYED";
+  status: "BEST" | "MIX" | "LOW_FREQUENCY_MIX" | "INACCURACY" | "MISTAKE" | "BLUNDER" | "CORRECT" | "WRONG" | "REVIEW" | "NOT_PLAYED";
   label: string;
   value?: string;
 };
 
 const REVIEW_ICONS: Record<UnifiedResultReview["status"], string> = {
   BEST: "✓✓",
+  MIX: "✓",
+  LOW_FREQUENCY_MIX: "!",
   CORRECT: "✓",
   INACCURACY: "!",
+  MISTAKE: "×",
+  BLUNDER: "×",
   WRONG: "×",
   REVIEW: "!",
   NOT_PLAYED: "—",
@@ -34,7 +38,7 @@ export function UnifiedResultPanel({ score, metricValue, metricLabel = "RangeLab
   nextAutoAdvanceActive?: boolean;
   nextDisabled?: boolean;
   nextAriaLabel?: string;
-  tone?: "best" | "correct" | "inaccuracy" | "wrong" | "review" | "neutral";
+  tone?: "best" | "mix" | "low-frequency" | "correct" | "inaccuracy" | "mistake" | "blunder" | "wrong" | "review" | "neutral";
   className?: string;
   titleId?: string;
   onInteraction?: () => void;
@@ -42,7 +46,7 @@ export function UnifiedResultPanel({ score, metricValue, metricLabel = "RangeLab
   onNext: () => void;
 }) {
   const progress = Math.max(0, Math.min(100, metricProgress ?? score));
-  const icon = resultIcon ?? (tone === "best" ? "✓✓" : tone === "correct" || score >= 75 ? "✓" : tone === "wrong" ? "×" : "!");
+  const icon = resultIcon ?? (tone === "best" ? "✓✓" : tone === "mix" || tone === "correct" || score >= 75 ? "✓" : tone === "mistake" || tone === "blunder" || tone === "wrong" ? "×" : "!");
   function registerInteraction(event: React.SyntheticEvent<HTMLElement>) {
     const target = event.target as HTMLElement;
     if (typeof target.closest === "function" && target.closest("button, a, input, select, textarea, summary, [role='button'], [role='tab']")) onInteraction?.();

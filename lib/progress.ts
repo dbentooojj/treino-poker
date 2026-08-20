@@ -1,4 +1,4 @@
-import { formatBb, recordValue, trainingTypeLabels, type EquityModel, type EvUnit, type TrainingAction, type TrainingType } from "./training";
+import { actionKey, classifyTrainingChoice, decisionQualityScore, formatBb, recordValue, trainingTypeLabels, type EquityModel, type EvUnit, type TrainingAction, type TrainingChoiceClassification, type TrainingType } from "./training";
 
 export type ProgressSessionRecord = {
   id: string;
@@ -25,6 +25,9 @@ export type ProgressAnswerRecord = {
   selectedAction: Record<string, unknown>;
   bestAction: string;
   isCorrect: boolean;
+  strategy?: Record<string, number>;
+  isMixed?: boolean | null;
+  availableActions?: TrainingAction[];
   evs: Record<string, number>;
   bigBlind: number;
   answeredAt: number;
@@ -71,6 +74,9 @@ export type ProgressDashboardData = {
   summary: {
     hands: number;
     accuracy: number | null;
+    decisionQuality: number | null;
+    principalActionRate: number | null;
+    principalActions: number | null;
     evEfficiency: number | null;
     evLossBb: number | null;
     comparison: {
@@ -119,8 +125,9 @@ export function calculateAnswerEvLossBb(answer: Pick<ProgressAnswerRecord, "equi
   const selected = answer.selectedAction as TrainingAction;
   if (!selected || typeof selected !== "object" || typeof selected.type !== "string") return null;
   const selectedEv = recordValue(answer.evs, selected);
-  const bestEv = findEv(answer.evs, answer.bestAction);
-  if (selectedEv === null || bestEv === null) return null;
+  if (findEv(answer.evs, answer.bestAction) === null) return null;
+  const bestEv = Math.max(...Object.values(answer.evs));
+  if (selectedEv === null || !Number.isFinite(bestEv)) return null;
   const nativeLoss = Math.max(0, bestEv - selectedEv);
   if (answer.evUnit === "BIG_BLINDS") return roundBb(nativeLoss);
   if (!Number.isFinite(answer.bigBlind) || answer.bigBlind <= 0) return null;
@@ -144,11 +151,20 @@ export function buildProgressDashboard(
     .filter((record) => record.totalAnswers > 0)
     .sort((left, right) => right.startedAt - left.startedAt);
   const answers = answerRecords
-    .map((answer) => ({ ...answer, evLossBb: calculateAnswerEvLossBb(answer) }))
+    .map((answer) => {
+      const classification = classifyProgressAnswer(answer);
+      return { ...answer, isCorrect: classification?.acceptable ?? answer.isCorrect, classification, evLossBb: calculateAnswerEvLossBb(answer) };
+    })
     .sort((left, right) => right.answeredAt - left.answeredAt);
   const hands = sessions.reduce((total, session) => total + session.totalAnswers, 0);
   const correct = sessions.reduce((total, session) => total + session.correctAnswers, 0);
   const evTotals = aggregateEv(answers);
+  const classifications = answers.map((answer) => answer.classification).filter((classification): classification is TrainingChoiceClassification => classification !== null);
+  const qualityScores = classifications.map(decisionQualityScore);
+  const decisionQuality = answers.length > 0 && classifications.length === answers.length && qualityScores.every((score): score is number => score !== null)
+    ? Math.round(qualityScores.reduce((total, score) => total + score, 0) / qualityScores.length)
+    : null;
+  const principalActions = classifications.length === answers.length ? classifications.filter((classification) => classification.isPrincipal).length : null;
 
   return {
     generatedAt,
@@ -156,6 +172,9 @@ export function buildProgressDashboard(
     summary: {
       hands,
       accuracy: hands ? calculateAccuracy(correct, hands) : null,
+      decisionQuality,
+      principalActionRate: principalActions === null || answers.length === 0 ? null : Math.round(principalActions / answers.length * 100),
+      principalActions,
       // There is no established RangeLab/HRC denominator for EV efficiency yet.
       evEfficiency: null,
       evLossBb: evTotals.samples ? roundBb(evTotals.loss) : null,
@@ -332,6 +351,17 @@ function sessionTotals(sessions: ProgressSessionRecord[]) {
     total: total.total + session.totalAnswers,
     correct: total.correct + session.correctAnswers,
   }), { total: 0, correct: 0 });
+}
+
+function classifyProgressAnswer(answer: ProgressAnswerRecord) {
+  if (!answer.strategy || !answer.availableActions?.length) return null;
+  const selected = answer.selectedAction as TrainingAction;
+  if (!selected || typeof selected !== "object" || typeof selected.type !== "string") return null;
+  return classifyTrainingChoice(actionKey(selected), answer.availableActions, answer.bestAction, answer.strategy, Boolean(answer.isMixed), {
+    evs: answer.evs,
+    evUnit: answer.evUnit,
+    bigBlind: answer.bigBlind,
+  });
 }
 
 function findEv(evs: Record<string, number>, key: string) {

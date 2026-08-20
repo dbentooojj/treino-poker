@@ -663,6 +663,23 @@ test("mixed strategy com três ações mantém frequências, EVs e IDs independe
   assert.deepEqual(hand.evs, { "action-0": -0.5, "action-1": 0.2, "action-2": 0.7 });
 });
 
+test("associa actions, played e evs exclusivamente pelo mesmo índice", async () => {
+  const node = {
+    ...pushNode,
+    children: 3,
+    actions: [{ type: "F", amount: 0 }, { type: "C", amount: 100 }, { type: "R", amount: 1_000 }],
+    hands: strategyHands([0.658, 0.107, 0.235], [0, -0.008, -0.004]),
+  };
+  const study = await studyFromNodes([node]);
+  const hand = study.nodes[0].hands.find((candidate) => candidate.handClass === "QJs")!;
+
+  assert.deepEqual(study.nodes[0].availableActions.map((action) => action.id), ["action-0", "action-1", "action-2"]);
+  assert.deepEqual(study.nodes[0].availableActions.map((action) => action.type), ["FOLD", "CALL", "RAISE"]);
+  assert.deepEqual(hand.strategy, { "action-0": 0.658, "action-1": 0.107, "action-2": 0.235 });
+  assert.deepEqual(hand.evs, { "action-0": 0, "action-1": -0.008, "action-2": -0.004 });
+  assert.equal(hand.bestAction, "action-0", "bestAction deve ser derivada do maior EV do mesmo vetor");
+});
+
 test("preserva source node não treinável e ligação action → child sem duplicar mãos", async () => {
   const parent = { ...pushNode, actions: [{ type: "F", amount: 0 }, { type: "R", amount: 1_000, node: 1 }] };
   const child = { player: -1, street: 0, children: 0, sequence: [], actions: [], hands: {} };

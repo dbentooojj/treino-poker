@@ -297,6 +297,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
   const [exercise, setExercise] = useState(session.exercise);
   const [answeredQuestions, setAnsweredQuestions] = useState(session.answeredQuestions);
   const [correctAnswers, setCorrectAnswers] = useState(session.correctAnswers);
+  const [principalActions, setPrincipalActions] = useState(session.principalActions);
   const [completedHands, setCompletedHands] = useState(session.completedHands);
   const [feedback, setFeedback] = useState<PendingSpotFeedback | null>(null);
   const [retryContext, setRetryContext] = useState<PendingSpotFeedback | null>(null);
@@ -393,7 +394,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
   async function choose(selected: TrainingAction) {
     if (busy || feedback) return;
     if (retryContext) {
-      const retry = evaluateChoice(actionKey(selected), exercise.availableActions, retryContext.answer.bestKey, retryContext.answer.evs, retryContext.answer.strategy);
+      const retry = evaluateChoice(actionKey(selected), exercise.availableActions, retryContext.answer.bestKey, retryContext.answer.evs, retryContext.answer.strategy, { evUnit: exercise.evUnit, bigBlind: exercise.blinds.bigBlind });
       if (!retry) {
         setError("Esta ação não está disponível neste spot.");
         return;
@@ -407,6 +408,7 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
           selectedKey: retry.selectedKey,
           bestKey: retry.bestKey,
           bestLabel: retry.bestLabel,
+          classification: retry.classification,
         },
       });
       advanceLockRef.current = false;
@@ -419,10 +421,11 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     setError("");
     try {
       const response = await fetch("/api/training/session", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "ANSWER", sessionId: session.id, questionIndex: answeredQuestions, trainingNodeId: exercise.trainingNodeId, trainingHandId: exercise.trainingHandId, selectedAction: actionKey(selected) }) });
-      const data = await response.json() as { answer: AnswerEvaluation; answeredQuestions: number; correctAnswers: number; completedHands: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
+      const data = await response.json() as { answer: AnswerEvaluation; answeredQuestions: number; correctAnswers: number; principalActions: number; completedHands: number; nextExercise: TrainingExercise | null; report: TrainingReport | null; replayed: boolean; error?: string };
       if (!response.ok) throw new Error(data.error || "Não foi possível salvar a resposta.");
       setAnsweredQuestions(data.answeredQuestions);
       setCorrectAnswers(data.correctAnswers);
+      setPrincipalActions(data.principalActions);
       setCompletedHands(data.completedHands);
       if (!data.answer || (!data.report && !data.nextExercise)) {
         throw new Error("Não foi possível carregar o próximo spot.");
@@ -480,7 +483,6 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
     : feedback || retryContext ? answeredQuestions : answeredQuestions + 1;
   const progress = session.targetQuestions ? `${Math.min(currentHand, session.targetQuestions)} / ${session.targetQuestions}` : `${currentHand}`;
   const errors = Math.max(0, answeredQuestions - correctAnswers);
-  const accuracy = answeredQuestions > 0 ? Math.round((correctAnswers / answeredQuestions) * 100) : null;
   return <section className="inline-training-session" aria-label="Sessão de treinamento">
     <aside className="spot-session-sidebar" aria-label="Resumo da sessão">
       <header><span>Sessão atual</span></header>
@@ -489,9 +491,9 @@ export function DatabaseTrainer({ session, onReport }: { session: TrainingSessio
         <progress value={session.targetQuestions ? Math.min(currentHand, session.targetQuestions) : undefined} max={session.targetQuestions ?? undefined} aria-label={`Progresso atual: ${progress}`}/>
       </div>
       <div className="spot-session-stats">
-        <div><span>Acerto</span><b>{accuracy === null ? "—" : `${accuracy}%`}</b></div>
-        <div><span>Corretas</span><b className="is-positive">{correctAnswers}</b></div>
-        <div><span>Erros</span><b className={errors > 0 ? "is-negative" : ""}>{errors}</b></div>
+        <div><span>Principais</span><b className="is-positive">{principalActions}</b></div>
+        <div><span>Ações válidas</span><b>{correctAnswers}</b></div>
+        <div><span>A revisar</span><b className={errors > 0 ? "is-negative" : ""}>{errors}</b></div>
       </div>
       <div className="spot-session-time"><span aria-label="Tempo de treino">Tempo<span className="spot-session-time-detail"> de treino</span></span><b>{formatDuration(elapsed)}</b></div>
       <label className="spot-auto-advance-setting"><input type="checkbox" checked={autoAdvanceEnabled} aria-label="Avançar automaticamente" onChange={(event) => updateAutoAdvancePreference(event.currentTarget.checked)}/><i aria-hidden="true"/><span>Avançar automaticamente</span></label>
@@ -576,7 +578,7 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
       <div className="report-top-row">
         <header className="report-minimal-summary">
           <span>Resultado do treino</span>
-          <p><strong>{report.accuracy}% de acerto</strong><i>·</i><b>{report.correctAnswers} corretas</b><i>·</i><b>{report.errors} erro{report.errors === 1 ? "" : "s"}</b><i>·</i><b className={report.evDelta !== null && report.evDelta < 0 ? "is-negative" : ""}>{reportEv}</b><i>·</i><b>{formatDuration(report.durationSeconds)}</b></p>
+          <p><strong>{report.decisionQuality === null ? "Qualidade qualitativa" : `${report.decisionQuality}% de qualidade`}</strong><i>·</i><b>{report.principalActions === null ? "Ações principais indisponíveis" : `${report.principalActions} / ${report.answeredQuestions} ações principais`}</b><i>·</i><b>{report.gradeCounts.MIX} mix</b><i>·</i><b>{report.gradeCounts.LOW_FREQUENCY_MIX} baixa frequência</b><i>·</i><b className={report.errors > 0 ? "is-negative" : ""}>{report.errors} a revisar</b><i>·</i><b className={report.evDelta !== null && report.evDelta < 0 ? "is-negative" : ""}>{reportEv}</b><i>·</i><b>{formatDuration(report.durationSeconds)}</b></p>
           <small>{report.presentationMode === "FROM_START" ? "Mão completa — Pré-flop" : report.trainingType === null ? "Todos os spots" : trainingTypeLabels[report.trainingType]} · {equityModelLabels[report.equityModel]} · {report.stackDepthBb === null ? "Stacks variados" : `${formatBb(report.stackDepthBb)} BB`} · {report.heroPosition === null ? "Todas as posições" : report.heroPosition}</small>
         </header>
         <div className="report-actions report-actions-top">
@@ -593,7 +595,7 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
           <b>{selectedSpot ? displayTrainingPosition(selectedSpot.exercise.heroPosition, selectedSpot.exercise.playersCount) : selectedDetail.heroPosition}{selectedSpot ? ` · ${formatBb(selectedSpot.exercise.heroStackBb)} BB` : ""}</b>
           <small>{selectedSpot ? reportSpotSequence(selectedSpot.exercise) : rangeLoading ? "Carregando contexto do spot…" : "Contexto do spot indisponível"}</small>
         </div>
-        <div className="report-selected-decision"><b>{selectedDetail.handClass}</b><span>{reportActionLabel(selectedDetail.selectedAction)} · {reportGradeLabel(selectedDetail.grade)}{selectedDetail.isMixed ? " · Mix" : ""}{selectedDetail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(selectedDetail.selectedFrequencyPercent)}% GTO` : ""} · mais frequente: {reportActionLabel(selectedDetail.dominantAction)}</span></div>
+        <div className="report-selected-decision"><b>{selectedDetail.handClass}</b><span>{reportActionLabel(selectedDetail.selectedAction)} · {reportGradeLabel(selectedDetail.grade)}{selectedDetail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(selectedDetail.selectedFrequencyPercent)}% GTO` : ""} · principal: {reportActionLabel(selectedDetail.dominantAction)}{selectedDetail.dominantFrequencyPercent !== null ? ` (${formatReportFrequency(selectedDetail.dominantFrequencyPercent)}%)` : ""}{selectedDetail.evLossBb !== null ? ` · EV loss ${formatReportFrequency(selectedDetail.evLossBb)} BB` : ""}</span></div>
       </div>}
 
       {report.decisionDetails.length > 0 && <div className="report-analysis-workspace">
@@ -604,7 +606,7 @@ export function TrainingReportView({ report, onExit, onStarted, user = null }: {
         <aside className="report-decision-browser" aria-label="Decisões da sessão">
           <header><h2>Decisões da sessão</h2><b>{report.decisionDetails.length}</b></header>
           <div>{report.decisionDetails.map((detail) => <button type="button" key={detail.questionIndex} className={`${detail.questionIndex === selectedQuestion ? "selected" : ""} grade-${detail.grade.toLowerCase()}`} aria-pressed={detail.questionIndex === selectedQuestion} onClick={() => selectReportQuestion(detail.questionIndex)}>
-            <span>#{detail.questionIndex + 1}</span><b>{detail.handClass}</b><i>{detail.heroPosition}</i><small>{reportActionLabel(detail.selectedAction)}{detail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(detail.selectedFrequencyPercent)}%` : ""}</small><strong>{reportGradeIcon(detail.grade)} {reportGradeLabel(detail.grade)}{detail.isMixed ? " · Mix" : ""}</strong>
+            <span>#{detail.questionIndex + 1}</span><b>{detail.handClass}</b><i>{detail.heroPosition}</i><small>{reportActionLabel(detail.selectedAction)}{detail.selectedFrequencyPercent !== null ? ` · ${formatReportFrequency(detail.selectedFrequencyPercent)}%` : ""}</small><strong>{reportGradeIcon(detail.grade)} {reportGradeLabel(detail.grade)}</strong>
           </button>)}</div>
         </aside>
       </div>}
@@ -662,16 +664,18 @@ function buildConfig(filters: TrainingFilters, targetQuestions: TrainingConfig["
 
 function reportGradeIcon(grade: TrainingChoiceGrade) {
   if (grade === "BEST") return "✓✓";
-  if (grade === "CORRECT") return "✓";
-  if (grade === "INACCURACY") return "!";
+  if (grade === "MIX") return "✓";
+  if (grade === "LOW_FREQUENCY_MIX" || grade === "INACCURACY") return "!";
   return "×";
 }
 
 function reportGradeLabel(grade: TrainingChoiceGrade) {
   if (grade === "BEST") return "Melhor";
-  if (grade === "CORRECT") return "Correta";
+  if (grade === "MIX") return "Mix válido";
+  if (grade === "LOW_FREQUENCY_MIX") return "Mix de baixa frequência";
   if (grade === "INACCURACY") return "Imprecisão";
-  return "Errada";
+  if (grade === "MISTAKE") return "Erro";
+  return "Erro grave";
 }
 
 function formatReportFrequency(value: number) {

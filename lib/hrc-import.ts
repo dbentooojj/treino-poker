@@ -1,4 +1,4 @@
-import type { EvUnit, StudyCapability, TrainingAction, TrainingSequenceAction, TrainingType } from "./training";
+import { TRAINING_EVALUATION_THRESHOLDS, type EvUnit, type StudyCapability, type TrainingAction, type TrainingSequenceAction, type TrainingType } from "./training";
 
 export type HrcAction = {
   type: "F" | "C" | "R" | "X";
@@ -306,7 +306,8 @@ export function toHrcStudyImport(pack: HrcPack, options: { releaseRawHands?: boo
           evs,
           bestAction: availableActions[bestIndex]?.id ?? null,
           decisionClarity: rankedEvs.length > 1 ? rankedEvs[0] - rankedEvs[1] : null,
-          isMixed: hand.played.slice(0, availableActions.length).filter((frequency) => frequency >= 0.05).length > 1,
+          isMixed: hand.played.slice(0, availableActions.length)
+            .filter((frequency) => frequency >= TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent / 100).length > 1,
           metadata: { ...hand.metadata, hrcWeight: hand.weight },
         };
       });

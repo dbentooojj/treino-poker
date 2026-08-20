@@ -6,7 +6,18 @@ export const TRAINING_VIEW_MODES = ["quick-decision", "full-hand"] as const;
 export const EQUITY_MODELS = ["CHIP_EV", "ICM"] as const;
 export const EV_UNITS = ["CHIPS", "BIG_BLINDS", "ICM_UTILITY", "UNKNOWN"] as const;
 export const QUESTION_COUNTS = [20, 50, 100] as const;
-export const MIN_STRATEGY_FREQUENCY_PERCENT = 5;
+export const TRAINING_EVALUATION_THRESHOLDS = {
+  residualFrequencyPercent: 1,
+  marginalFrequencyPercent: 5,
+  lowFrequencyMixMaxPercent: 15,
+  minorityFrequencyPercent: 25,
+  principalFrequencyPercent: 50,
+  equivalentEvLossBb: 0.01,
+  smallInaccuracyEvLossBb: 0.03,
+  inaccuracyEvLossBb: 0.10,
+  mistakeEvLossBb: 0.25,
+  qualityZeroEvLossBb: 0.25,
+} as const;
 export const MAX_EXERCISE_QUEUE_SIZE = 100;
 
 export type TrainingType = (typeof TRAINING_TYPES)[number];
@@ -30,7 +41,9 @@ export type TrainingAction = {
 export type TrainingSequenceAction = TrainingAction & { position?: string };
 export type TrainingStreet = "PREFLOP" | "FLOP" | "TURN" | "RIVER";
 export type TrainingGameType = "TOURNAMENT";
-export type TrainingChoiceGrade = "BEST" | "CORRECT" | "INACCURACY" | "WRONG";
+export type TrainingChoiceGrade = "BEST" | "MIX" | "LOW_FREQUENCY_MIX" | "INACCURACY" | "MISTAKE" | "BLUNDER";
+export type TrainingFrequencyBand = "RESIDUAL" | "MARGINAL" | "MINORITY" | "RELEVANT" | "PRINCIPAL";
+export type TrainingDataIssue = "BEST_ACTION_MISMATCH" | "STRATEGY_EV_MISMATCH";
 
 export type TrainingFilters = {
   trainingType?: TrainingType;
@@ -118,6 +131,7 @@ export type AnswerEvaluation = {
   evs: Record<string, number>;
   decisionClarity: number | null;
   isMixed: boolean;
+  classification?: TrainingChoiceClassification;
 };
 
 export type NodeRangeHand = {
@@ -141,6 +155,7 @@ export type StrategyActionPresentation = {
   frequency: number | null;
   frequencyPercent: number | null;
   isInStrategy: boolean;
+  frequencyBand: TrainingFrequencyBand | null;
 };
 
 export type StrategyPresentation = {
@@ -151,8 +166,15 @@ export type StrategyPresentation = {
 
 export type TrainingChoiceClassification = {
   grade: TrainingChoiceGrade;
+  acceptable: boolean;
+  isPrincipal: boolean;
+  evLoss: number | null;
+  evLossBb: number | null;
+  hasReliableEvUnit: boolean;
+  dataIssues: TrainingDataIssue[];
   selectedAction: StrategyActionPresentation | null;
   dominantAction: StrategyActionPresentation | null;
+  bestAction: StrategyActionPresentation | null;
   strategy: StrategyPresentation | null;
 };
 
@@ -163,6 +185,7 @@ export type TrainingSession = {
   targetQuestions: number | null;
   answeredQuestions: number;
   correctAnswers: number;
+  principalActions: number;
   completedHands: number;
   evDelta: number;
   evUnit: EvUnit;
@@ -180,6 +203,11 @@ export type TrainingDecisionDetail = {
   dominantAction: string;
   grade: TrainingChoiceGrade;
   selectedFrequencyPercent: number | null;
+  dominantFrequencyPercent: number | null;
+  evLoss: number | null;
+  evLossBb: number | null;
+  isPrincipal: boolean;
+  dataIssues: TrainingDataIssue[];
   isCorrect: boolean;
   isMixed: boolean;
   strategy: Record<string, number>;
@@ -202,6 +230,10 @@ export type TrainingReport = {
   correctAnswers: number;
   errors: number;
   accuracy: number;
+  decisionQuality: number | null;
+  principalActions: number | null;
+  classifiedDecisions: number;
+  gradeCounts: Record<TrainingChoiceGrade, number>;
   evDelta: number | null;
   evUnit: EvUnit | null;
   durationSeconds: number;
@@ -338,38 +370,106 @@ export function presentStrategy(strategy: Record<string, number>, actions: Train
       key: actionKey(action),
       frequency,
       frequencyPercent: percentage,
-      isInStrategy: percentage !== null && percentage >= MIN_STRATEGY_FREQUENCY_PERCENT,
+      isInStrategy: percentage !== null && percentage > 0,
+      frequencyBand: trainingFrequencyBand(percentage),
     };
   });
-  const actionable = presented.filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null && item.frequencyPercent >= MIN_STRATEGY_FREQUENCY_PERCENT);
+  const actionable = presented.filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null && item.frequencyPercent >= TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent);
   const dominantAction = [...presented].filter((item): item is StrategyActionPresentation & { frequencyPercent: number } => item.frequencyPercent !== null)
     .sort((left, right) => right.frequencyPercent - left.frequencyPercent)[0] ?? null;
-  return { actions: presented, isMixed: mixedHint ?? actionable.length > 1, dominantAction };
+  // mixedHint is retained in the signature for persisted/API compatibility, but
+  // stale imports must not override the frequency vector that is the source of truth.
+  void mixedHint;
+  return { actions: presented, isMixed: actionable.length > 1, dominantAction };
 }
 
-export function classifyTrainingChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, strategy?: Record<string, number>, mixedHint?: boolean): TrainingChoiceClassification | null {
+export function trainingFrequencyBand(frequency: number | null): TrainingFrequencyBand | null {
+  if (frequency === null || !Number.isFinite(frequency) || frequency < 0) return null;
+  if (frequency < TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent) return "RESIDUAL";
+  if (frequency < TRAINING_EVALUATION_THRESHOLDS.marginalFrequencyPercent) return "MARGINAL";
+  if (frequency < TRAINING_EVALUATION_THRESHOLDS.minorityFrequencyPercent) return "MINORITY";
+  if (frequency <= TRAINING_EVALUATION_THRESHOLDS.principalFrequencyPercent) return "RELEVANT";
+  return "PRINCIPAL";
+}
+
+export type TrainingChoiceContext = {
+  evs?: Record<string, number>;
+  evUnit?: EvUnit;
+  bigBlind?: number;
+};
+
+export function classifyTrainingChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, strategy?: Record<string, number>, mixedHint?: boolean, context: TrainingChoiceContext = {}): TrainingChoiceClassification | null {
   const selected = actions.find((action) => actionAliases(action).includes(selectedKey));
   if (!selected) return null;
   const configuredBest = bestAction ? actions.find((action) => actionAliases(action).includes(bestAction)) : null;
   const presented = strategy && isValidStrategy(strategy, actions) ? presentStrategy(strategy, actions, mixedHint) : null;
   const selectedPresentation = presented?.actions.find((item) => sameAction(item.action, selected)) ?? null;
+  const evVector = validActionValues(context.evs, actions);
+  const evBest = evVector ? [...evVector].sort((left, right) => right.value - left.value)[0] : null;
+  const resolvedBest = evBest?.action ?? configuredBest;
+  const bestPresentation = resolvedBest
+    ? presented?.actions.find((item) => sameAction(item.action, resolvedBest)) ?? actionPresentationWithoutStrategy(resolvedBest)
+    : null;
   const selectedFrequency = selectedPresentation?.frequencyPercent;
-  if (selectedFrequency !== null && selectedFrequency !== undefined) {
-    const grade: TrainingChoiceGrade = configuredBest && sameAction(selected, configuredBest)
-      ? "BEST"
-      : selectedFrequency >= MIN_STRATEGY_FREQUENCY_PERCENT
-        ? "CORRECT"
-        : selectedFrequency > 0
-          ? "INACCURACY"
-          : "WRONG";
-    return { grade, selectedAction: selectedPresentation, dominantAction: presented?.dominantAction ?? null, strategy: presented };
+  const selectedEv = evVector?.find((item) => sameAction(item.action, selected))?.value ?? null;
+  const evLoss = selectedEv !== null && evBest ? clampEvLoss(evBest.value - selectedEv) : null;
+  const evLossBb = normalizeEvLossBb(evLoss, context.evUnit, context.bigBlind);
+  const isPrincipal = Boolean(presented?.dominantAction && sameAction(selected, presented.dominantAction.action));
+  const dataIssues: TrainingDataIssue[] = [];
+  const configuredEv = configuredBest ? evVector?.find((item) => sameAction(item.action, configuredBest))?.value ?? null : null;
+  if (configuredBest && evBest && !sameAction(configuredBest, evBest.action) && configuredEv !== null && evBest.value - configuredEv > 0.000000001) dataIssues.push("BEST_ACTION_MISMATCH");
+  if (presented && evBest && evVector?.some((item) => {
+    const frequency = presented.actions.find((candidate) => sameAction(candidate.action, item.action))?.frequencyPercent ?? 0;
+    const lossBb = normalizeEvLossBb(clampEvLoss(evBest.value - item.value), context.evUnit, context.bigBlind);
+    return frequency >= TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent
+      && lossBb !== null
+      && lossBb > TRAINING_EVALUATION_THRESHOLDS.equivalentEvLossBb;
+  })) dataIssues.push("STRATEGY_EV_MISMATCH");
+
+  let grade: TrainingChoiceGrade;
+  if (evLossBb !== null) {
+    if (evLossBb <= TRAINING_EVALUATION_THRESHOLDS.equivalentEvLossBb) {
+      if (isPrincipal) grade = "BEST";
+      else if ((selectedFrequency ?? 0) >= TRAINING_EVALUATION_THRESHOLDS.lowFrequencyMixMaxPercent) grade = "MIX";
+      else if ((selectedFrequency ?? 0) >= TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent) grade = "LOW_FREQUENCY_MIX";
+      else grade = "INACCURACY";
+    } else if (evLossBb <= TRAINING_EVALUATION_THRESHOLDS.inaccuracyEvLossBb) grade = "INACCURACY";
+    else if (evLossBb <= TRAINING_EVALUATION_THRESHOLDS.mistakeEvLossBb) grade = "MISTAKE";
+    else grade = "BLUNDER";
+  } else if (presented && selectedFrequency !== null && selectedFrequency !== undefined) {
+    if (isPrincipal) grade = "BEST";
+    else if (selectedFrequency >= TRAINING_EVALUATION_THRESHOLDS.lowFrequencyMixMaxPercent) grade = "MIX";
+    else if (selectedFrequency >= TRAINING_EVALUATION_THRESHOLDS.residualFrequencyPercent) grade = "LOW_FREQUENCY_MIX";
+    else if (selectedFrequency > 0) grade = "INACCURACY";
+    else grade = "MISTAKE";
+  } else {
+    grade = resolvedBest && sameAction(selected, resolvedBest) ? "BEST" : "MISTAKE";
   }
   return {
-    grade: configuredBest && sameAction(selected, configuredBest) ? "BEST" : "WRONG",
-    selectedAction: null,
-    dominantAction: null,
-    strategy: null,
+    grade,
+    acceptable: grade === "BEST" || grade === "MIX" || grade === "LOW_FREQUENCY_MIX",
+    isPrincipal,
+    evLoss,
+    evLossBb,
+    hasReliableEvUnit: evLossBb !== null,
+    dataIssues,
+    selectedAction: selectedPresentation,
+    dominantAction: presented?.dominantAction ?? null,
+    bestAction: bestPresentation,
+    strategy: presented,
   };
+}
+
+export function decisionQualityScore(classification: Pick<TrainingChoiceClassification, "evLossBb">) {
+  if (classification.evLossBb === null) return null;
+  return Math.round(Math.max(0, 1 - classification.evLossBb / TRAINING_EVALUATION_THRESHOLDS.qualityZeroEvLossBb) * 100);
+}
+
+export function normalizeEvLossBb(evLoss: number | null, evUnit?: EvUnit, bigBlind?: number) {
+  if (evLoss === null || !Number.isFinite(evLoss)) return null;
+  if (evUnit === "BIG_BLINDS") return clampEvLoss(evLoss);
+  if (evUnit === "CHIPS" && typeof bigBlind === "number" && Number.isFinite(bigBlind) && bigBlind > 0) return clampEvLoss(evLoss / bigBlind);
+  return null;
 }
 
 export function rangeActionShares(strategy: Record<string, number>, actions: TrainingAction[]) {
@@ -401,6 +501,23 @@ function strategyVectorTotal(strategy: Record<string, number>, actions: Training
   }, 0);
 }
 
+function validActionValues(record: Record<string, number> | undefined, actions: TrainingAction[]) {
+  if (!record || !actions.length || Object.keys(record).length !== actions.length) return null;
+  const values = actions.map((action) => ({ action, key: actionKey(action), value: recordValue(record, action) }));
+  if (values.some((item) => item.value === null || !Number.isFinite(item.value))) return null;
+  const matchedKeys = actions.map((action) => actionAliases(action).find((alias) => Object.hasOwn(record, alias)) ?? null);
+  if (matchedKeys.some((key) => key === null) || new Set(matchedKeys).size !== actions.length || Object.keys(record).some((key) => !matchedKeys.includes(key))) return null;
+  return values as Array<{ action: TrainingAction; key: string; value: number }>;
+}
+
+function actionPresentationWithoutStrategy(action: TrainingAction): StrategyActionPresentation {
+  return { action, key: actionKey(action), frequency: null, frequencyPercent: null, isInStrategy: false, frequencyBand: null };
+}
+
+function clampEvLoss(value: number) {
+  return Math.max(0, value);
+}
+
 export const RANGE_RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"] as const;
 
 export type RangeMatrixCell = {
@@ -423,16 +540,20 @@ export function buildRangeMatrix(): RangeMatrixCell[] {
   })));
 }
 
-export function evaluateChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, evs: Record<string, number>, strategy?: Record<string, number>) {
+export function evaluateChoice(selectedKey: string, actions: TrainingAction[], bestAction: string | null, evs: Record<string, number>, strategy?: Record<string, number>, context: Omit<TrainingChoiceContext, "evs"> = {}) {
   const selected = actions.find((action) => actionAliases(action).includes(selectedKey));
   if (!selected) return null;
-  const values = actions.map((action) => ({ action, key: actionKey(action), value: recordValue(evs, action) }));
-  const evBest = values.filter((item): item is typeof item & { value: number } => item.value !== null).sort((left, right) => right.value - left.value)[0];
-  const configured = bestAction ? values.find((item) => actionAliases(item.action).includes(bestAction)) : undefined;
-  const best = configured ?? evBest ?? values[0];
-  const classification = classifyTrainingChoice(selectedKey, actions, best.key, strategy);
-  const correct = classification?.grade === "BEST" || classification?.grade === "CORRECT";
-  return { correct, selected, selectedKey: actionKey(selected), bestKey: best.key, bestLabel: best.action.label ?? best.key };
+  const classification = classifyTrainingChoice(selectedKey, actions, bestAction, strategy, undefined, { ...context, evs });
+  if (!classification) return null;
+  const best = classification.bestAction?.action ?? actions.find((action) => bestAction && actionAliases(action).includes(bestAction)) ?? actions[0];
+  return {
+    correct: classification.acceptable,
+    selected,
+    selectedKey: actionKey(selected),
+    bestKey: actionKey(best),
+    bestLabel: best.label ?? actionKey(best),
+    classification,
+  };
 }
 
 export function fisherYates<T>(values: readonly T[], random: () => number = Math.random): T[] {

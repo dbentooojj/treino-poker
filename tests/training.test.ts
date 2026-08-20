@@ -128,23 +128,23 @@ test("labels distinguem Complete e níveis de re-raise", () => {
   assert.equal(resolvedActionLabel(raise, [raise], { heroStackBb: 20, trainingType: "VS_4_BET" }), "5-bet 12 BB");
 });
 
-test("avaliação aceita toda ação com frequência relevante em mixed strategies", () => {
+test("avaliação qualitativa distingue mixes sem usar 5% como sinônimo de correta", () => {
   const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "shove", type: "RAISE", amountBb: 10 }];
   const evs = { fold: 0.9, shove: 1 };
   assert.equal(evaluateChoice("fold", actions, "shove", evs, { fold: 0.4, shove: 0.6 })?.correct, true, "a alternativa de 40% pertence ao mix");
   assert.equal(evaluateChoice("shove", actions, "shove", evs, { fold: 0.4, shove: 0.6 })?.correct, true);
-  assert.equal(evaluateChoice("fold", actions, "shove", evs, { fold: 0.049, shove: 0.951 })?.correct, false, "frequência abaixo do limiar continua sendo erro");
+  assert.equal(evaluateChoice("fold", actions, "shove", evs, { fold: 0.049, shove: 0.951 })?.classification.grade, "LOW_FREQUENCY_MIX");
   assert.equal(evaluateChoice("fold", actions, "shove", evs)?.correct, false, "estudos legados sem estratégia usam best_action como fallback");
 });
 
-test("mixed strategy usa a escala do vetor inteiro e respeita a borda de 5%", () => {
+test("mixed strategy usa a escala do vetor inteiro sem uma borda binária de 5%", () => {
   const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "shove", type: "RAISE", amountBb: 10 }];
   const evs = { fold: 1, shove: 0.9 };
 
   const onePercent = presentStrategy({ fold: 99, shove: 1 }, actions);
   assert.deepEqual(onePercent.actions.map((item) => item.frequencyPercent), [99, 1]);
-  assert.equal(onePercent.actions[1].isInStrategy, false);
-  assert.equal(evaluateChoice("shove", actions, "fold", evs, { fold: 99, shove: 1 })?.correct, false);
+  assert.equal(onePercent.actions[1].isInStrategy, true);
+  assert.equal(evaluateChoice("shove", actions, "fold", evs, { fold: 99, shove: 1 })?.classification.grade, "LOW_FREQUENCY_MIX");
 
   const fivePercent = presentStrategy({ fold: 95, shove: 5 }, actions);
   assert.deepEqual(fivePercent.actions.map((item) => item.frequencyPercent), [95, 5]);
@@ -156,18 +156,18 @@ test("mixed strategy usa a escala do vetor inteiro e respeita a borda de 5%", ()
   assert.equal(evaluateChoice("shove", actions, "fold", evs, { fold: 0.95, shove: 0.05 })?.correct, true);
 });
 
-test("classifica melhor jogada, alternativa correta, imprecisão e erro pela frequência", () => {
+test("classifica ação dominante, mix, mix de baixa frequência e ação ausente", () => {
   const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }, { id: "raise", type: "RAISE" }];
   const strategy = { fold: 0.7, call: 0.26, raise: 0.04 };
   assert.equal(classifyTrainingChoice("fold", actions, "fold", strategy)?.grade, "BEST");
-  assert.equal(classifyTrainingChoice("call", actions, "fold", strategy)?.grade, "CORRECT");
-  assert.equal(classifyTrainingChoice("raise", actions, "fold", strategy)?.grade, "INACCURACY");
-  assert.equal(classifyTrainingChoice("raise", actions, "fold", { fold: 0.74, call: 0.26, raise: 0 })?.grade, "WRONG");
+  assert.equal(classifyTrainingChoice("call", actions, "fold", strategy)?.grade, "MIX");
+  assert.equal(classifyTrainingChoice("raise", actions, "fold", strategy)?.grade, "LOW_FREQUENCY_MIX");
+  assert.equal(classifyTrainingChoice("raise", actions, "fold", { fold: 0.74, call: 0.26, raise: 0 })?.grade, "MISTAKE");
 });
 
-test("melhor jogada segue o maior EV configurado, não a maior frequência", () => {
+test("melhor jogada pedagógica segue a ação dominante quando a unidade de EV é desconhecida", () => {
   const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }];
-  assert.equal(classifyTrainingChoice("fold", actions, "call", { fold: 0.7, call: 0.3 })?.grade, "CORRECT");
+  assert.equal(classifyTrainingChoice("fold", actions, "call", { fold: 0.7, call: 0.3 })?.grade, "BEST");
   assert.equal(classifyTrainingChoice("call", actions, "call", { fold: 0.4998, call: 0.5002 })?.grade, "BEST");
 });
 
@@ -181,9 +181,62 @@ test("distingue sizings de raise ao classificar e apresentar ações", () => {
   const strategy = { fold: 0, call: 0.314, "three-bet": 0.074, "all-in": 0.612 };
   const context = { heroStackBb: 20, trainingType: "VS_OPEN" as const };
 
-  assert.equal(classifyTrainingChoice("three-bet", actions, "call", strategy)?.grade, "CORRECT");
+  assert.equal(classifyTrainingChoice("three-bet", actions, "call", strategy)?.grade, "LOW_FREQUENCY_MIX");
   assert.ok(Math.abs((classifyTrainingChoice("all-in", actions, "call", strategy)?.selectedAction?.frequencyPercent ?? 0) - 61.2) < 0.000001);
   assert.equal(resolvedActionLabel(actions[3], actions, context), "All-in");
+});
+
+test("classificação GTO separa frequência, ação dominante e EV loss", () => {
+  const actions: TrainingAction[] = [
+    { id: "fold", type: "FOLD" },
+    { id: "call", type: "CALL" },
+    { id: "jam", type: "RAISE", label: "All-in" },
+  ];
+  const reliable = (selected: string, strategy: Record<string, number>, evs: Record<string, number>) => classifyTrainingChoice(
+    selected,
+    actions,
+    "call",
+    strategy,
+    undefined,
+    { evs, evUnit: "BIG_BLINDS", bigBlind: 1 },
+  );
+
+  assert.equal(reliable("fold", { fold: 1, call: 0, jam: 0 }, { fold: 0, call: -1, jam: -2 })?.grade, "BEST");
+  assert.equal(reliable("call", { fold: 1, call: 0, jam: 0 }, { fold: 0, call: -0.18, jam: -2 })?.grade, "MISTAKE");
+
+  assert.equal(reliable("fold", { fold: 0.6, call: 0, jam: 0.4 }, { fold: 0, call: -1, jam: -0.005 })?.grade, "BEST");
+  assert.equal(reliable("jam", { fold: 0.6, call: 0, jam: 0.4 }, { fold: 0, call: -1, jam: -0.005 })?.grade, "MIX");
+
+  const qjsStrategy = { fold: 0.658, call: 0.107, jam: 0.235 };
+  const qjsEvs = { fold: 0, call: -0.008, jam: -0.004 };
+  assert.equal(reliable("fold", qjsStrategy, qjsEvs)?.grade, "BEST");
+  assert.equal(reliable("jam", qjsStrategy, qjsEvs)?.grade, "MIX");
+  assert.equal(reliable("call", qjsStrategy, qjsEvs)?.grade, "LOW_FREQUENCY_MIX");
+});
+
+test("frequência residual ou acima de 5% não ignora EV loss material", () => {
+  const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }];
+  const residual = classifyTrainingChoice("call", actions, "fold", { fold: 0.995, call: 0.005 }, undefined, {
+    evs: { fold: 0, call: 0 }, evUnit: "BIG_BLINDS", bigBlind: 1,
+  });
+  assert.equal(residual?.grade, "INACCURACY");
+  assert.equal(residual?.acceptable, false);
+
+  const materialLoss = classifyTrainingChoice("call", actions, "fold", { fold: 0.9, call: 0.1 }, undefined, {
+    evs: { fold: 0, call: -0.18 }, evUnit: "BIG_BLINDS", bigBlind: 1,
+  });
+  assert.equal(materialLoss?.grade, "MISTAKE");
+  assert.equal(materialLoss?.evLossBb, 0.18);
+});
+
+test("unidade desconhecida preserva EV nativo sem inventar EV loss em BB", () => {
+  const actions: TrainingAction[] = [{ id: "fold", type: "FOLD" }, { id: "call", type: "CALL" }];
+  const classification = classifyTrainingChoice("call", actions, "fold", { fold: 0.9, call: 0.1 }, undefined, {
+    evs: { fold: 10, call: 6.909 }, evUnit: "UNKNOWN", bigBlind: 10_000,
+  });
+  assert.equal(classification?.evLoss, 3.091);
+  assert.equal(classification?.evLossBb, null);
+  assert.equal(classification?.grade, "LOW_FREQUENCY_MIX");
 });
 
 test("avaliação não usa estratégia legada incompleta ou com soma inválida", () => {

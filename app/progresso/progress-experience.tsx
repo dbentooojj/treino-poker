@@ -40,17 +40,18 @@ export default function ProgressExperience({ data }: { data: ProgressDashboardDa
         variation={formatVariation(data.summary.comparison.hands, "")}
       />
       <SummaryCard
-        label={partialCoverage ? "Precisão na janela" : "Precisão geral"}
-        value={formatPercent(data.summary.accuracy)}
+        label="Qualidade das decisões"
+        value={formatPercent(data.summary.decisionQuality)}
         icon="target"
-        variation={formatVariation(data.summary.comparison.accuracy, " pp")}
+        variation={null}
+        unavailable="Exige EV normalizado com unidade confiável em todas as decisões."
       />
       <SummaryCard
-        label="Eficiência EV"
-        value={formatPercent(data.summary.evEfficiency)}
+        label="Ações principais"
+        value={data.summary.principalActions === null ? "—" : `${numberFormatter.format(data.summary.principalActions)} · ${formatPercent(data.summary.principalActionRate)}`}
         icon="trend"
-        variation={formatVariation(data.summary.comparison.evEfficiency, " pp")}
-        unavailable="Métrica ainda não definida com segurança para os dados HRC."
+        variation={null}
+        unavailable="Conta escolhas da ação dominante; mixes válidos não são tratados como erro."
       />
       <SummaryCard
         label="EV perdido"

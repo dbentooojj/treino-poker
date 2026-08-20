@@ -139,3 +139,44 @@ test("expõe explicitamente quando os limites de memória truncam o histórico",
   const dashboard = buildProgressDashboard([], [], Date.UTC(2026, 7, 9), coverage);
   assert.deepEqual(dashboard.coverage, coverage);
 });
+
+test("progresso separa qualidade por EV loss de ações principais", () => {
+  const now = Date.UTC(2026, 7, 9);
+  const session: ProgressSessionRecord = {
+    id: "mixed-session",
+    trainingType: "VS_OPEN",
+    playersCount: 8,
+    stackBb: 20,
+    heroPosition: "BB",
+    correctAnswers: 2,
+    totalAnswers: 2,
+    durationSeconds: 30,
+    startedAt: now - 1_000,
+    endedAt: now,
+  };
+  const actions = [{ id: "fold", type: "FOLD" as const }, { id: "jam", type: "RAISE" as const }];
+  const base = {
+    sessionId: session.id,
+    trainingType: session.trainingType,
+    equityModel: "CHIP_EV" as const,
+    evUnit: "BIG_BLINDS" as const,
+    trainingNodeId: "node",
+    handClass: "QJs",
+    heroPosition: "BB",
+    stackBb: 20,
+    bestAction: "fold",
+    isCorrect: true,
+    strategy: { fold: .6, jam: .4 },
+    isMixed: true,
+    availableActions: actions,
+    bigBlind: 1,
+  };
+  const answers: ProgressAnswerRecord[] = [
+    { ...base, selectedAction: actions[0], evs: { fold: 0, jam: -.02 }, answeredAt: now - 2 },
+    { ...base, selectedAction: actions[1], evs: { fold: 0, jam: -.02 }, answeredAt: now - 1 },
+  ];
+  const dashboard = buildProgressDashboard([session], answers, now);
+  assert.equal(dashboard.summary.decisionQuality, 96);
+  assert.equal(dashboard.summary.principalActions, 1);
+  assert.equal(dashboard.summary.principalActionRate, 50);
+});

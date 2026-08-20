@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { PokerCard, Rank } from "../../lib/poker/cards";
-import { actionAliases, actionKey, classifyTrainingChoice, formatBb, recordValue, type AnswerEvaluation, type TrainingAction, type TrainingChoiceGrade, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext, type TrainingViewMode } from "../../lib/training";
+import { actionAliases, actionKey, classifyTrainingChoice, formatBb, type AnswerEvaluation, type TrainingAction, type TrainingChoiceGrade, type TrainingExercise, type TrainingSequenceAction, type TrainingTableContext, type TrainingViewMode } from "../../lib/training";
 import { PlayingCard } from "../play/PlayingCard";
 import { UnifiedActionPanel } from "./UnifiedActionPanel";
 import { UnifiedPokerTable, type UnifiedTableSeat } from "./UnifiedPokerTable";
@@ -184,19 +184,28 @@ function SpotResult({ exercise, feedback, nextLabel, nextCompactLabel, nextCount
   const bestAction = exercise.availableActions.find((action) => actionAliases(action).includes(answer.bestKey));
   const selectedLabel = selectedAction ? actionResultLabel(selectedAction, exercise) : feedback.selectedKey;
   const bestLabel = bestAction ? actionResultLabel(bestAction, exercise) : answer.bestLabel;
-  const classification = classifyTrainingChoice(feedback.selectedKey, exercise.availableActions, answer.bestKey, answer.strategy, answer.isMixed);
-  const grade = classification?.grade ?? (answer.correct ? "CORRECT" : "WRONG");
+  const classification = answer.classification ?? classifyTrainingChoice(feedback.selectedKey, exercise.availableActions, answer.bestKey, answer.strategy, answer.isMixed, {
+    evs: answer.evs,
+    evUnit: exercise.evUnit,
+    bigBlind: exercise.blinds.bigBlind,
+  });
+  const grade = classification?.grade ?? "MISTAKE";
   const dominantLabel = classification?.dominantAction ? actionResultLabel(classification.dominantAction.action, exercise) : bestLabel;
   const selectedFrequency = classification?.selectedAction?.frequencyPercent ?? null;
+  const dominantFrequency = classification?.dominantAction?.frequencyPercent ?? null;
   const presentation = resultPresentation(grade);
-  const summary = grade === "BEST"
-    ? `Você escolheu ${selectedLabel}, a ação de maior EV${answer.isMixed ? " deste mix" : " da estratégia"}.`
-    : grade === "CORRECT"
-      ? `Você escolheu ${selectedLabel}. A ação faz parte do mix; ${dominantLabel} aparece com mais frequência.`
-      : grade === "INACCURACY"
-        ? `Você escolheu ${selectedLabel}. O solver usa essa ação raramente neste spot.`
-        : `Você escolheu ${selectedLabel}. Essa ação não faz parte da estratégia do solver.`;
-  const evDelta = selectedAction ? decisionEvDelta(selectedAction, exercise.availableActions, answer.evs) : null;
+  const gradeSummary = grade === "BEST"
+    ? `${selectedLabel} é a ação principal da estratégia.`
+    : grade === "MIX"
+      ? `${selectedLabel} faz parte do mix. A estratégia principal é ${dominantLabel}${dominantFrequency === null ? "" : `, com ${formatFrequency(dominantFrequency)}%`}.`
+      : grade === "LOW_FREQUENCY_MIX"
+        ? `${selectedLabel} aparece no mix em baixa frequência; ${dominantLabel} é utilizado com muito mais frequência.`
+        : classification?.evLossBb !== null && classification?.evLossBb !== undefined
+          ? `Essa escolha perde ${formatFrequency(classification.evLossBb)} BB em relação à melhor decisão. Melhor ação: ${bestLabel}.`
+          : `Essa escolha não é sustentada pela estratégia principal. A unidade do EV não foi verificada.`;
+  const summary = classification?.dataIssues.length
+    ? `${gradeSummary} As frequências e os EVs deste spot divergem; revise a importação ou a convergência do estudo.`
+    : gradeSummary;
   const reviews: UnifiedResultReview[] = [
     ...(viewMode === "full-hand" ? [{ id: "preflop", status: grade, label: "Pré-flop" }] : []),
   ];
@@ -211,8 +220,8 @@ function SpotResult({ exercise, feedback, nextLabel, nextCompactLabel, nextCount
     title={presentation.title}
     description={summary}
     reviews={reviews}
-    details={<div className="spot-selected-choice" aria-label={`Escolha: ${selectedLabel}${selectedFrequency === null ? "" : `, ${formatFrequency(selectedFrequency)}% de frequência GTO`}`}><span>Escolha</span><b>{selectedLabel}</b>{selectedFrequency !== null && <strong>{formatFrequency(selectedFrequency)}% GTO</strong>}</div>}
-    footer={evDelta !== null ? <span>ΔEV da decisão: <b className={evDelta < 0 ? "is-negative" : ""}>{formatDecisionEv(evDelta, exercise.evUnit)}</b></span> : undefined}
+    details={<div className="spot-selected-choice" aria-label={`Escolha: ${selectedLabel}${selectedFrequency === null ? "" : `, ${formatFrequency(selectedFrequency)}% de frequência GTO`}`}><span>Escolha</span><b>{selectedLabel}</b>{selectedFrequency !== null && <strong>{formatFrequency(selectedFrequency)}% GTO</strong>}{dominantLabel !== selectedLabel && <small>Principal: {dominantLabel}{dominantFrequency === null ? "" : ` · ${formatFrequency(dominantFrequency)}%`}</small>}</div>}
+    footer={classification?.evLossBb !== null && classification?.evLossBb !== undefined ? <span>EV loss: <b className={classification.evLossBb > 0 ? "is-negative" : ""}>{formatFrequency(classification.evLossBb)} BB</b></span> : undefined}
     repeatLabel="Repetir spot"
     nextLabel={nextLabel}
     nextCompactLabel={nextCompactLabel}
@@ -231,29 +240,17 @@ function SpotResult({ exercise, feedback, nextLabel, nextCompactLabel, nextCount
 
 function resultPresentation(grade: TrainingChoiceGrade) {
   if (grade === "BEST") return { icon: "✓✓", title: "MELHOR JOGADA", tone: "best" as const };
-  if (grade === "CORRECT") return { icon: "✓", title: "JOGADA CORRETA", tone: "correct" as const };
+  if (grade === "MIX") return { icon: "✓", title: "AÇÃO GTO VÁLIDA", tone: "mix" as const };
+  if (grade === "LOW_FREQUENCY_MIX") return { icon: "!", title: "AÇÃO GTO DE BAIXA FREQUÊNCIA", tone: "low-frequency" as const };
   if (grade === "INACCURACY") return { icon: "!", title: "IMPRECISÃO", tone: "inaccuracy" as const };
-  return { icon: "×", title: "JOGADA ERRADA", tone: "wrong" as const };
-}
-
-function decisionEvDelta(selectedAction: TrainingAction, actions: TrainingAction[], evs: Record<string, number>) {
-  const selectedEv = recordValue(evs, selectedAction);
-  const availableEvs = actions.map((action) => recordValue(evs, action)).filter((value): value is number => value !== null && Number.isFinite(value));
-  return selectedEv === null || availableEvs.length === 0 ? null : selectedEv - Math.max(...availableEvs);
+  if (grade === "MISTAKE") return { icon: "×", title: "ERRO", tone: "mistake" as const };
+  return { icon: "×", title: "ERRO GRAVE", tone: "blunder" as const };
 }
 
 function formatFrequency(value: number) {
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(value);
 }
 
-function formatDecisionEv(value: number, unit: TrainingExercise["evUnit"]) {
-  const sign = value < 0 ? "−" : value > 0 ? "+" : "";
-  const amount = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 3 }).format(Math.abs(value));
-  if (unit === "BIG_BLINDS") return `${sign}${amount} BB`;
-  if (unit === "CHIPS") return `${sign}${amount} fichas`;
-  if (unit === "ICM_UTILITY") return `${sign}${amount} ICM`;
-  return `${sign}${amount}`;
-}
 
 function handClassPokerCards(handClass: string): [PokerCard, PokerCard] {
   const clean = handClass.trim().toUpperCase();

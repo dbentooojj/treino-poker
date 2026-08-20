@@ -1,4 +1,4 @@
-import { actionKey, actionLabel, frequencyPercent, presentStrategy, recordValue, type AnswerEvaluation, type NodeRange, type TrainingExercise } from "../../lib/training";
+import { actionKey, actionLabel, classifyTrainingChoice, frequencyPercent, presentStrategy, recordValue, type AnswerEvaluation, type NodeRange, type TrainingExercise } from "../../lib/training";
 import { RangeMatrix } from "./RangeMatrix";
 import { SolverFrequencies } from "./SolverFrequencies";
 import { HeroHand } from "./TrainingDecision";
@@ -15,18 +15,17 @@ export function TrainingFeedback({ exercise, answer, choiceKey, range, isLast, o
   const strategy = presentStrategy(answer.strategy, exercise.availableActions, answer.isMixed);
   const selectedAction = exercise.availableActions.find((action) => actionKey(action) === choiceKey);
   const dominant = strategy.dominantAction;
-  const selected = strategy.actions.find((item) => item.key === choiceKey);
-  const mixed = strategy.isMixed;
-  const selectedInStrategy = Boolean(selected?.isInStrategy);
+  const classification = answer.classification ?? classifyTrainingChoice(choiceKey, exercise.availableActions, answer.bestKey, answer.strategy, answer.isMixed, { evs: answer.evs, evUnit: exercise.evUnit, bigBlind: exercise.blinds.bigBlind });
+  const grade = classification?.grade ?? "MISTAKE";
   const recommendation = dominant ? actionLabel(dominant.action, exercise) : answer.bestLabel;
   const chosenLabel = selectedAction ? actionLabel(selectedAction, exercise) : "Sua ação";
-  const tone = mixed ? "mixed" : answer.correct ? "good" : "bad";
-  const mainMessage = mixed
-    ? selectedInStrategy ? "Decisão dentro da estratégia" : "Essa ação foge da estratégia"
-    : answer.correct ? "Boa decisão" : "Essa não era a melhor opção";
-  const followup = mixed
-    ? selectedInStrategy ? `Você escolheu ${chosenLabel}; o solver mistura ações neste spot.` : `O solver prefere ${recommendation} com maior frequência.`
-    : answer.correct ? <>Você escolheu: <b>{chosenLabel}</b></> : <>Você escolheu <b>{chosenLabel}</b>. A recomendação é <b>{recommendation}</b>.</>;
+  const tone = grade === "BEST" || grade === "MIX" ? "good" : grade === "LOW_FREQUENCY_MIX" || grade === "INACCURACY" ? "mixed" : "bad";
+  const mainMessage = grade === "BEST" ? "Melhor jogada" : grade === "MIX" ? "Ação GTO válida" : grade === "LOW_FREQUENCY_MIX" ? "Ação GTO de baixa frequência" : grade === "INACCURACY" ? "Imprecisão" : grade === "MISTAKE" ? "Erro" : "Erro grave";
+  const followup = grade === "BEST"
+    ? <>Você escolheu <b>{chosenLabel}</b>, a ação principal.</>
+    : grade === "MIX" || grade === "LOW_FREQUENCY_MIX"
+      ? <>Você escolheu <b>{chosenLabel}</b>; a estratégia principal é <b>{recommendation}</b>.</>
+      : <>Você escolheu <b>{chosenLabel}</b>. A melhor decisão é <b>{answer.bestLabel}</b>.</>;
   const explanation = buildExplanation(exercise, strategy, recommendation);
 
   return <section className={`rl-training-feedback tone-${tone}`} aria-live="polite">
@@ -34,7 +33,7 @@ export function TrainingFeedback({ exercise, answer, choiceKey, range, isLast, o
       <div className="rl-feedback-primary">
         <header className="rl-feedback-header">
           <div className="rl-feedback-hand"><HeroHand handClass={exercise.handClass} compact/><b>{exercise.handClass}</b></div>
-          <div className="rl-result-icon" aria-hidden="true">{mixed ? "!" : answer.correct ? "✓" : "×"}</div>
+          <div className="rl-result-icon" aria-hidden="true">{grade === "BEST" || grade === "MIX" ? "✓" : grade === "LOW_FREQUENCY_MIX" || grade === "INACCURACY" ? "!" : "×"}</div>
           <div className="rl-result-copy"><h1>{mainMessage}</h1><p>{followup}</p></div>
         </header>
         <SolverFrequencies exercise={exercise} answer={answer}/>
@@ -54,12 +53,13 @@ export function TrainingFeedback({ exercise, answer, choiceKey, range, isLast, o
 }
 
 function ExpectedValuePanel({ exercise, answer, choiceKey }: { exercise: TrainingExercise; answer: AnswerEvaluation; choiceKey: string }) {
-  const delta = answer.decisionClarity ?? evDifference(exercise, answer);
+  const classification = answer.classification ?? classifyTrainingChoice(choiceKey, exercise.availableActions, answer.bestKey, answer.strategy, answer.isMixed, { evs: answer.evs, evUnit: exercise.evUnit, bigBlind: exercise.blinds.bigBlind });
+  const delta = exercise.evUnit === "UNKNOWN" ? null : answer.decisionClarity ?? evDifference(exercise, answer);
   const bestAction = exercise.availableActions.find((action) => actionKey(action) === answer.bestKey);
   const selectedAction = exercise.availableActions.find((action) => actionKey(action) === choiceKey);
   const bestEv = bestAction ? recordValue(answer.evs, bestAction) : null;
   const selectedEv = selectedAction ? recordValue(answer.evs, selectedAction) : null;
-  const selectedLoss = bestEv !== null && selectedEv !== null ? Math.max(0, bestEv - selectedEv) : null;
+  const selectedLoss = exercise.evUnit === "UNKNOWN" ? null : bestEv !== null && selectedEv !== null ? Math.max(0, bestEv - selectedEv) : null;
   return <section className="rl-ev-card">
     <h2>VALOR ESPERADO (EV) · {evUnitLabel(exercise.evUnit)}</h2>
     <div className="rl-ev-table" role="table" aria-label="Valor esperado por ação">
@@ -77,7 +77,7 @@ function ExpectedValuePanel({ exercise, answer, choiceKey }: { exercise: Trainin
     </div>
     <div className="rl-ev-summary">
       <div><span>Melhor ação</span><b>{bestAction ? actionLabel(bestAction, exercise) : answer.bestLabel}</b></div>
-      <div><span>Perda da escolha</span><b className={selectedLoss && selectedLoss > 0 ? "loss" : ""}>{selectedLoss === null ? "—" : selectedLoss > 0 ? `−${formatEvWithUnit(selectedLoss, exercise.evUnit)}` : formatEvWithUnit(0, exercise.evUnit)}</b></div>
+      <div><span>EV loss</span><b className={(classification?.evLossBb ?? selectedLoss ?? 0) > 0 ? "loss" : ""}>{classification?.evLossBb !== null && classification?.evLossBb !== undefined ? `${formatEv(classification.evLossBb)} BB` : selectedLoss === null ? "—" : formatEvWithUnit(selectedLoss, exercise.evUnit)}</b></div>
       <div className="rl-delta-ev"><span>ΔEV</span><b>{delta === null ? "—" : `${delta >= 0 ? "+" : ""}${formatEvWithUnit(delta, exercise.evUnit)}`}</b></div>
     </div>
   </section>;

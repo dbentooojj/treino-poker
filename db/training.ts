@@ -7,6 +7,7 @@ import {
   actionAliases,
   actionKey,
   classifyTrainingChoice,
+  decisionQualityScore,
   resolvedActionLabel,
   evaluateChoice,
   fisherYates,
@@ -17,6 +18,7 @@ import {
   type QueueEntry,
   type TrainingAction,
   type TrainingConfig,
+  type TrainingChoiceGrade,
   type TrainingExercise,
   type TrainingFilters,
   type TrainingOptions,
@@ -190,7 +192,7 @@ export async function createTrainingSession(userId: string, request: SessionStar
     }
     throw error;
   }
-  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, completedHands: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
+  return { id, startedAt: startedAt.getTime(), config, targetQuestions: config.targetQuestions, answeredQuestions: 0, correctAnswers: 0, principalActions: 0, completedHands: 0, evDelta: 0, evUnit: exercise.evUnit, exercise };
 }
 
 export async function answerTrainingSession(userId: string, input: AnswerTrainingInput) {
@@ -207,7 +209,10 @@ export async function answerTrainingSession(userId: string, input: AnswerTrainin
   const exerciseData = await getExerciseData(entry);
   if (!exerciseData) throw new TrainingSessionStateError("Exercício não encontrado.");
   const availableActions = exerciseData.availableActions as TrainingAction[];
-  const evaluation = evaluateChoice(input.selectedAction, availableActions, exerciseData.bestAction, exerciseData.evs, exerciseData.strategy);
+  const evaluation = evaluateChoice(input.selectedAction, availableActions, exerciseData.bestAction, exerciseData.evs, exerciseData.strategy, {
+    evUnit: exerciseData.evUnit,
+    bigBlind: exerciseData.bigBlind,
+  });
   const nodeRange = await getNodeRange(entry);
   if (!nodeRange) throw new TrainingSessionStateError("Range do exercicio nao encontrado.");
   if (!evaluation) throw new TrainingSessionStateError("Ação indisponível para este exercício.");
@@ -281,11 +286,12 @@ export async function answerTrainingSession(userId: string, input: AnswerTrainin
     evs: exerciseData.evs,
     decisionClarity: exerciseData.decisionClarity,
     isMixed: Boolean(exerciseData.isMixed),
+    classification: evaluation.classification,
   };
-  if (completed) return { answer, nodeRange, answeredQuestions, correctAnswers, completedHands: session.completedHands, report: await getTrainingReport(userId, session.id), nextExercise: null, replayed: false };
+  if (completed) return { answer, nodeRange, answeredQuestions, correctAnswers, principalActions: await getSessionPrincipalActions(session.id), completedHands: session.completedHands, report: await getTrainingReport(userId, session.id), nextExercise: null, replayed: false };
   const nextExercise = await getExercise(nextQueue[nextPosition]);
   if (!nextExercise) throw new TrainingSessionStateError("Próximo exercício não encontrado.");
-  return { answer, nodeRange, answeredQuestions, correctAnswers, completedHands: session.completedHands, report: null, nextExercise, replayed: false };
+  return { answer, nodeRange, answeredQuestions, correctAnswers, principalActions: await getSessionPrincipalActions(session.id), completedHands: session.completedHands, report: null, nextExercise, replayed: false };
 }
 
 async function createFullHandTrainingSession(userId: string, requestedConfig: TrainingConfig, sourceSessionId: string | null = null): Promise<TrainingSession> {
@@ -339,6 +345,7 @@ async function createFullHandTrainingSession(userId: string, requestedConfig: Tr
     targetQuestions: config.targetQuestions,
     answeredQuestions: 0,
     correctAnswers: 0,
+    principalActions: 0,
     completedHands: 0,
     evDelta: 0,
     evUnit: exercise.evUnit,
@@ -364,7 +371,10 @@ async function answerFullHandTrainingSession(
   const availableActions = exerciseData.availableActions as TrainingAction[];
   const actionIndex = availableActions.findIndex((action) => actionAliases(action).includes(input.selectedAction));
   if (actionIndex < 0) throw new TrainingSessionStateError("Ação indisponível nesta decisão.");
-  const evaluation = evaluateChoice(input.selectedAction, availableActions, exerciseData.bestAction, exerciseData.evs, exerciseData.strategy);
+  const evaluation = evaluateChoice(input.selectedAction, availableActions, exerciseData.bestAction, exerciseData.evs, exerciseData.strategy, {
+    evUnit: exerciseData.evUnit,
+    bigBlind: exerciseData.bigBlind,
+  });
   const nodeRange = await getNodeRange(entry);
   if (!evaluation || !nodeRange) throw new TrainingSessionStateError("Estratégia da decisão não encontrada.");
 
@@ -425,6 +435,7 @@ async function answerFullHandTrainingSession(
     throw error;
   }
 
+  const principalActions = await getSessionPrincipalActions(session.id);
   const answer: AnswerEvaluation = {
     correct: evaluation.correct,
     selectedKey: evaluation.selectedKey,
@@ -434,6 +445,7 @@ async function answerFullHandTrainingSession(
     evs: exerciseData.evs,
     decisionClarity: exerciseData.decisionClarity,
     isMixed: Boolean(exerciseData.isMixed),
+    classification: evaluation.classification,
   };
   if (completed) {
     return {
@@ -441,6 +453,7 @@ async function answerFullHandTrainingSession(
       nodeRange,
       answeredQuestions,
       correctAnswers,
+      principalActions,
       completedHands,
       report: await getTrainingReport(userId, session.id),
       nextExercise: null,
@@ -454,6 +467,7 @@ async function answerFullHandTrainingSession(
     nodeRange,
     answeredQuestions,
     correctAnswers,
+    principalActions,
     completedHands,
     report: null,
     nextExercise,
@@ -474,6 +488,7 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
   const exercise = await getExercise(entry);
   if (!exercise) throw new TrainingSessionStateError("A pergunta atual da sessão não está mais disponível.");
   const evMetric = await getTrainingSessionEv(session.id, exercise.evUnit);
+  const principalActions = await getSessionPrincipalActions(session.id);
   return {
     id: session.id,
     startedAt: session.startedAt.getTime(),
@@ -481,6 +496,7 @@ export async function getActiveTrainingSession(userId: string, sessionId?: strin
     targetQuestions: session.targetQuestions,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    principalActions,
     completedHands: session.completedHands,
     evDelta: evMetric.value,
     evUnit: evMetric.unit,
@@ -499,7 +515,7 @@ async function getTrainingSessionEv(sessionId: string, fallbackUnit: EvUnit) {
   let unit = fallbackUnit;
   for (const answer of answers) {
     const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
-    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    const bestEv = Math.max(...Object.values(answer.evs));
     if (selectedEv !== null && Number.isFinite(bestEv)) value += selectedEv - bestEv;
     unit = answer.evUnit;
   }
@@ -534,11 +550,13 @@ export async function getTrainingReport(userId: string, sessionId: string): Prom
     strategy: trainingAnswers.strategy,
     evs: trainingAnswers.evs,
     evUnit: trainingAnswers.evUnit,
+    bigBlind: trainingSets.bigBlind,
     trainingType: trainingNodes.trainingType,
     heroStackBb: trainingNodes.heroStackBb,
     availableActions: trainingNodes.availableActions,
   }).from(trainingAnswers)
     .innerJoin(trainingNodes, eq(trainingNodes.id, trainingAnswers.trainingNodeId))
+    .innerJoin(trainingSets, eq(trainingSets.id, trainingAnswers.trainingSetId))
     .where(eq(trainingAnswers.trainingSessionId, session.id)).orderBy(asc(trainingAnswers.questionIndex)).limit(MAX_REPORT_ANSWER_DETAILS);
   return buildReport(session, answers);
 }
@@ -745,16 +763,23 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
   if (!exerciseData || !nodeRange) throw new TrainingSessionStateError("A resposta registrada não pode mais ser reconstruída.");
   const actions = exerciseData.availableActions as TrainingAction[];
   const best = actions.find((action) => actionAliases(action).includes(recorded.bestAction));
+  const classification = classifyTrainingChoice(actionKey(selected), actions, recorded.bestAction, recorded.strategy, Boolean(recorded.isMixed), {
+    evs: recorded.evs,
+    evUnit: exerciseData.evUnit,
+    bigBlind: exerciseData.bigBlind,
+  });
   const answer: AnswerEvaluation = {
-    correct: recorded.isCorrect,
+    correct: classification?.acceptable ?? recorded.isCorrect,
     selectedKey: actionKey(selected),
-    bestKey: recorded.bestAction,
-    bestLabel: best?.label ?? recorded.bestAction,
+    bestKey: classification?.bestAction?.key ?? recorded.bestAction,
+    bestLabel: classification?.bestAction?.action.label ?? best?.label ?? recorded.bestAction,
     strategy: recorded.strategy,
     evs: recorded.evs,
     decisionClarity: recorded.decisionClarity,
     isMixed: Boolean(recorded.isMixed),
+    ...(classification ? { classification } : {}),
   };
+  const principalActions = await getSessionPrincipalActions(session.id);
 
   if (session.endedAt) {
     return {
@@ -762,6 +787,7 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
       nodeRange,
       answeredQuestions: session.answeredQuestions,
       correctAnswers: session.correctAnswers,
+      principalActions,
       completedHands: session.completedHands,
       report: await getTrainingReport(userId, session.id),
       nextExercise: null,
@@ -776,6 +802,7 @@ async function recordedAnswerResponse(userId: string, input: AnswerTrainingInput
     nodeRange,
     answeredQuestions: session.answeredQuestions,
     correctAnswers: session.correctAnswers,
+    principalActions,
     completedHands: session.completedHands,
     report: null,
     nextExercise,
@@ -804,19 +831,38 @@ function sameConfig(left: TrainingConfig, right: TrainingConfig) {
     && left.targetQuestions === right.targetQuestions;
 }
 
-type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; trainingType: TrainingType | null; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
+type ReportAnswerRow = { questionIndex: number; handClass: string; heroPosition: string; selectedAction: Record<string, unknown>; bestAction: string; isCorrect: boolean; isMixed: boolean | null; strategy: Record<string, number>; evs: Record<string, number>; evUnit: TrainingReport["decisionDetails"][number]["evUnit"]; bigBlind: number; trainingType: TrainingType | null; heroStackBb: number; availableActions: Array<Record<string, unknown>> };
 
 function buildReport(session: typeof trainingSessions.$inferSelect, answers: ReportAnswerRow[]): TrainingReport {
   const answered = session.answeredQuestions;
-  const correct = session.correctAnswers;
+  const classified = answers.map((answer) => {
+    const availableActions = answer.availableActions as TrainingAction[];
+    const selectedKey = actionKey(answer.selectedAction as TrainingAction);
+    const classification = classifyTrainingChoice(selectedKey, availableActions, answer.bestAction, answer.strategy, Boolean(answer.isMixed), {
+      evs: answer.evs,
+      evUnit: answer.evUnit,
+      bigBlind: answer.bigBlind,
+    });
+    return { answer, availableActions, selectedKey, classification };
+  });
+  const detailsComplete = answers.length === answered;
+  const correct = detailsComplete ? classified.filter((item) => item.classification?.acceptable).length : session.correctAnswers;
   const accuracy = answered ? Math.round(correct / answered * 100) : 0;
-  const byPosition = groupAnswers(answers, (answer) => answer.heroPosition);
-  const clarityAnswers = answers.filter((answer) => answer.isMixed !== null);
+  const semanticAnswers = classified.map(({ answer, classification }) => ({ ...answer, isCorrect: classification?.acceptable ?? false }));
+  const byPosition = groupAnswers(semanticAnswers, (answer) => answer.heroPosition);
+  const clarityAnswers = semanticAnswers.filter((answer) => answer.isMixed !== null);
   const byDecisionType = groupAnswers(clarityAnswers, (answer) => answer.isMixed ? "Estratégias mistas" : "Decisões claras").filter((group) => group.answered >= 3);
   const missed = new Map<string, number>();
-  for (const answer of answers) if (!answer.isCorrect) missed.set(answer.handClass, (missed.get(answer.handClass) ?? 0) + 1);
+  for (const answer of semanticAnswers) if (!answer.isCorrect) missed.set(answer.handClass, (missed.get(answer.handClass) ?? 0) + 1);
   const mostMissedHands = [...missed].map(([handClass, errors]) => ({ handClass, errors })).sort((left, right) => right.errors - left.errors || left.handClass.localeCompare(right.handClass)).slice(0, 8);
   const evMetric = reportEvMetric(answers);
+  const qualityScores = classified.map((item) => item.classification ? decisionQualityScore(item.classification) : null);
+  const decisionQuality = detailsComplete && qualityScores.length === answered && qualityScores.every((score): score is number => score !== null)
+    ? Math.round(qualityScores.reduce((total, score) => total + score, 0) / Math.max(1, qualityScores.length))
+    : null;
+  const principalActions = detailsComplete ? classified.filter((item) => item.classification?.isPrincipal).length : null;
+  const gradeCounts = emptyGradeCounts();
+  for (const item of classified) if (item.classification) gradeCounts[item.classification.grade] += 1;
   const feedback: string[] = [];
   if (answered >= 5 && accuracy >= 80) feedback.push(`Bom desempenho geral: ${accuracy}% de acerto.`);
   const comparablePositions = byPosition.filter((group) => group.answered >= 3);
@@ -846,6 +892,10 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Rep
     correctAnswers: correct,
     errors: answered - correct,
     accuracy,
+    decisionQuality,
+    principalActions,
+    classifiedDecisions: classified.filter((item) => item.classification !== null).length,
+    gradeCounts,
     evDelta: evMetric?.value ?? null,
     evUnit: evMetric?.unit ?? null,
     durationSeconds: session.durationSeconds,
@@ -853,23 +903,28 @@ function buildReport(session: typeof trainingSessions.$inferSelect, answers: Rep
     byPosition,
     byDecisionType,
     mostMissedHands,
-    errorDetails: answers.filter((answer) => !answer.isCorrect).map((answer) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: reportAnswerActionLabel(answer, answer.selectedAction), bestAction: reportAnswerActionLabel(answer, answer.bestAction) })),
+    errorDetails: classified.filter((item) => !item.classification?.acceptable).map(({ answer, classification }) => ({ handClass: answer.handClass, heroPosition: answer.heroPosition, selectedAction: reportAnswerActionLabel(answer, answer.selectedAction), bestAction: classification?.bestAction ? reportAnswerActionLabel(answer, classification.bestAction.action) : reportAnswerActionLabel(answer, answer.bestAction) })),
     decisionDetails: answers.map((answer) => {
       const availableActions = answer.availableActions as TrainingAction[];
       const selectedKey = actionKey(answer.selectedAction as TrainingAction);
-      const classification = classifyTrainingChoice(selectedKey, availableActions, answer.bestAction, answer.strategy, Boolean(answer.isMixed));
+      const classification = classifyTrainingChoice(selectedKey, availableActions, answer.bestAction, answer.strategy, Boolean(answer.isMixed), { evs: answer.evs, evUnit: answer.evUnit, bigBlind: answer.bigBlind });
       return {
         questionIndex: answer.questionIndex,
         handClass: answer.handClass,
         heroPosition: answer.heroPosition,
         selectedAction: reportAnswerActionLabel(answer, answer.selectedAction),
         selectedKey,
-        bestAction: reportAnswerActionLabel(answer, answer.bestAction),
+        bestAction: classification?.bestAction ? reportAnswerActionLabel(answer, classification.bestAction.action) : reportAnswerActionLabel(answer, answer.bestAction),
         dominantAction: classification?.dominantAction ? reportAnswerActionLabel(answer, classification.dominantAction.action) : reportAnswerActionLabel(answer, answer.bestAction),
-        grade: classification?.grade ?? (answer.isCorrect ? "CORRECT" : "WRONG"),
+        grade: classification?.grade ?? "MISTAKE",
         selectedFrequencyPercent: classification?.selectedAction?.frequencyPercent ?? null,
-        isCorrect: answer.isCorrect,
-        isMixed: Boolean(answer.isMixed),
+        dominantFrequencyPercent: classification?.dominantAction?.frequencyPercent ?? null,
+        evLoss: classification?.evLoss ?? null,
+        evLossBb: classification?.evLossBb ?? null,
+        isPrincipal: classification?.isPrincipal ?? false,
+        dataIssues: classification?.dataIssues ?? [],
+        isCorrect: classification?.acceptable ?? false,
+        isMixed: classification?.strategy?.isMixed ?? Boolean(answer.isMixed),
         strategy: answer.strategy,
         evs: answer.evs,
         evUnit: answer.evUnit,
@@ -898,6 +953,10 @@ function buildLegacyReport(session: typeof trainingSessions.$inferSelect): Train
     correctAnswers: correct,
     errors: answered - correct,
     accuracy: answered ? Math.round(correct / answered * 100) : 0,
+    decisionQuality: null,
+    principalActions: null,
+    classifiedDecisions: 0,
+    gradeCounts: emptyGradeCounts(),
     evDelta: null,
     evUnit: null,
     durationSeconds: session.durationSeconds,
@@ -915,14 +974,44 @@ function reportEvMetric(answers: Array<{ selectedAction: Record<string, unknown>
   if (!answers.length) return null;
   let value = 0;
   const unit = answers[0].evUnit;
+  if (unit === "UNKNOWN") return null;
   for (const answer of answers) {
     if (answer.evUnit !== unit) return null;
     const selectedEv = recordValue(answer.evs, answer.selectedAction as TrainingAction);
-    const bestEv = typeof answer.evs[answer.bestAction] === "number" ? answer.evs[answer.bestAction] : Math.max(...Object.values(answer.evs));
+    const bestEv = Math.max(...Object.values(answer.evs));
     if (selectedEv === null || !Number.isFinite(bestEv)) continue;
     value += selectedEv - bestEv;
   }
   return { value, unit };
+}
+
+async function getSessionPrincipalActions(sessionId: string) {
+  const rows = await getDb().select({
+    selectedAction: trainingAnswers.selectedAction,
+    bestAction: trainingAnswers.bestAction,
+    strategy: trainingAnswers.strategy,
+    evs: trainingAnswers.evs,
+    isMixed: trainingAnswers.isMixed,
+    evUnit: trainingAnswers.evUnit,
+    availableActions: trainingNodes.availableActions,
+    bigBlind: trainingSets.bigBlind,
+  }).from(trainingAnswers)
+    .innerJoin(trainingNodes, eq(trainingNodes.id, trainingAnswers.trainingNodeId))
+    .innerJoin(trainingSets, eq(trainingSets.id, trainingAnswers.trainingSetId))
+    .where(eq(trainingAnswers.trainingSessionId, sessionId));
+  return rows.reduce((total, row) => {
+    const selected = row.selectedAction as TrainingAction;
+    const classification = classifyTrainingChoice(actionKey(selected), row.availableActions as TrainingAction[], row.bestAction, row.strategy, Boolean(row.isMixed), {
+      evs: row.evs,
+      evUnit: row.evUnit,
+      bigBlind: row.bigBlind,
+    });
+    return total + (classification?.isPrincipal ? 1 : 0);
+  }, 0);
+}
+
+function emptyGradeCounts(): Record<TrainingChoiceGrade, number> {
+  return { BEST: 0, MIX: 0, LOW_FREQUENCY_MIX: 0, INACCURACY: 0, MISTAKE: 0, BLUNDER: 0 };
 }
 
 function groupAnswers<T>(answers: T[], label: (answer: T) => string) {

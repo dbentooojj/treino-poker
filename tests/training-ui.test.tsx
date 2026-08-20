@@ -341,6 +341,10 @@ test("relatório diferencia totais completos de detalhes recentes limitados", ()
     correctAnswers: 999,
     errors: 2,
     accuracy: 100,
+    decisionQuality: 96,
+    principalActions: 800,
+    classifiedDecisions: 1_000,
+    gradeCounts: { BEST: 800, MIX: 150, LOW_FREQUENCY_MIX: 48, INACCURACY: 1, MISTAKE: 1, BLUNDER: 0 },
     evDelta: -0.25,
     evUnit: "BIG_BLINDS",
     durationSeconds: 1_001,
@@ -392,8 +396,8 @@ test("drill avança sem revelar a solução e concentra a análise no relatório
 
   const feedbackMarkup = renderToStaticMarkup(<TrainingDecision exercise={makeExercise(2, [fold, call])} busy={false} feedback={{ answer: { correct: false, selectedKey: "fold", bestKey: "call", bestLabel: "Call", strategy: { fold: 0, call: 1 }, evs: { fold: 0, call: 1 }, decisionClarity: 1, isMixed: false }, selectedKey: "fold" }} onChoose={() => undefined} onRepeat={() => undefined} onNext={() => undefined}/>);
   assert.match(feedbackMarkup, /RESULTADO DO SPOT/);
-  assert.match(feedbackMarkup, /data-tone="wrong"/);
-  assert.match(feedbackMarkup, /JOGADA ERRADA/);
+  assert.match(feedbackMarkup, /data-tone="mistake"/);
+  assert.match(feedbackMarkup, />ERRO</);
   assert.match(feedbackMarkup, /Repetir spot/);
   assert.match(feedbackMarkup, /Próximo spot/);
   assert.match(feedbackMarkup, /data-feedback="true"/);
@@ -428,14 +432,16 @@ test("feedback distingue ação correta do mix da ação mais frequente", () => 
     onRepeat={() => undefined}
     onNext={() => undefined}
   />);
-  assert.match(markup, /data-tone="correct"/);
+  assert.match(markup, /data-tone="mix"/);
   assert.match(markup, />✓<\/i>/);
-  assert.match(markup, /JOGADA CORRETA/);
-  assert.match(markup, /−0,02/);
+  assert.match(markup, /AÇÃO GTO VÁLIDA/);
+  assert.match(markup, /estratégia principal é Call, com 72%/);
+  assert.doesNotMatch(markup, /EV loss/);
 });
 
 test("feedback usa o maior EV como melhor jogada mesmo quando outro raise é mais frequente", () => {
   const exercise = makeExercise(2, [fold, call, threeBet, allIn]);
+  exercise.evUnit = "BIG_BLINDS";
   const markup = renderToStaticMarkup(<TrainingDecision
     exercise={exercise}
     busy={false}
@@ -444,9 +450,26 @@ test("feedback usa o maior EV como melhor jogada mesmo quando outro raise é mai
     onRepeat={() => undefined}
     onNext={() => undefined}
   />);
-  assert.match(markup, /JOGADA CORRETA/);
-  assert.match(markup, /All-in 20 BB aparece com mais frequência/);
+  assert.match(markup, /IMPRECISÃO/);
+  assert.match(markup, /Melhor ação: Call/);
+  assert.match(markup, /EV loss/);
   assert.doesNotMatch(markup, /MELHOR JOGADA/);
+});
+
+test("feedback não rotula EV nativo como BB quando a unidade é desconhecida", () => {
+  const exercise = makeExercise(2, [fold, call]);
+  exercise.evUnit = "UNKNOWN";
+  exercise.blinds.bigBlind = 10_000;
+  const markup = renderToStaticMarkup(<TrainingDecision
+    exercise={exercise}
+    busy={false}
+    feedback={{ answer: { correct: true, selectedKey: "call", bestKey: "fold", bestLabel: "Fold", strategy: { fold: .9, call: .1 }, evs: { fold: 10, call: 6.909 }, decisionClarity: 3.091, isMixed: true }, selectedKey: "call" }}
+    onChoose={() => undefined}
+    onRepeat={() => undefined}
+    onNext={() => undefined}
+  />);
+  assert.match(markup, /AÇÃO GTO DE BAIXA FREQUÊNCIA/);
+  assert.doesNotMatch(markup, /3[,.]091 BB|EV loss/);
 });
 
 test("feedback mostra countdown acessível e progresso no mesmo botão de próximo spot", () => {
@@ -520,7 +543,7 @@ test("treinar oferece mão completa somente por estudos compatíveis, sem cenár
   assert.match(trainer, /className="inline-training-session"/);
   assert.match(trainer, /className="spot-session-sidebar"/);
   assert.match(trainer, /<progress value=\{session\.targetQuestions/);
-  for (const label of ["Sessão atual", "Progresso", "Acerto", "Corretas", "Erros", "Tempo de treino"]) assert.match(trainer, new RegExp(label));
+  for (const label of ["Sessão atual", "Progresso", "Principais", "Ações válidas", "A revisar", "Tempo de treino"]) assert.match(trainer, new RegExp(label));
   assert.doesNotMatch(trainer, /EV do treino/);
   assert.doesNotMatch(trainer, /className="spot-session-toolbar"/);
   assert.doesNotMatch(trainer, /training-screen training-screen-redesigned/);
